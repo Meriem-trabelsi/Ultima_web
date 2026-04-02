@@ -165,6 +165,65 @@
   .animate-fade-in {
     animation: fade-in 0.8s ease-out;
   }
+
+  /* Scroll-triggered animations */
+  .scroll-hidden {
+    opacity: 0;
+    transform: translateY(40px);
+    transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .scroll-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .scroll-hidden-left {
+    opacity: 0;
+    transform: translateX(-60px);
+    transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .scroll-hidden-right {
+    opacity: 0;
+    transform: translateX(60px);
+    transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .scroll-visible-x {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .scroll-scale-hidden {
+    opacity: 0;
+    transform: scale(0.9);
+    transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .scroll-scale-visible {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  /* Parallax overlay */
+  .hero-overlay {
+    background: linear-gradient(
+      to right,
+      hsl(var(--background) / 0.85) 0%,
+      hsl(var(--background) / 0.4) 60%,
+      transparent 100%
+    );
+  }
+
+  /* Diagonal divider like PlaySight */
+  .diagonal-divider {
+    clip-path: polygon(0 0, 100% 0, 100% 85%, 0 100%);
+  }
+
+  .diagonal-divider-reverse {
+    clip-path: polygon(0 15%, 100% 0, 100% 100%, 0 100%);
+  }
 }
 
 @keyframes float {
