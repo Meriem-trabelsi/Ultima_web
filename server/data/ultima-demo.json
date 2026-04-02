@@ -12,7 +12,7 @@
     },
     {
       "id": 2,
-      "first_name": "Sami",
+      "first_name": "Imed",
       "last_name": "Trabelsi",
       "email": "sami@email.com",
       "role": "coach",
@@ -22,8 +22,8 @@
     },
     {
       "id": 3,
-      "first_name": "Mariem",
-      "last_name": "Ferchichi",
+      "first_name": "Meryam",
+      "last_name": "Trbsli",
       "email": "mariem@email.com",
       "role": "player",
       "status": "inactive",
