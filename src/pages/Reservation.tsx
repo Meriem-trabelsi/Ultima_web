@@ -1,42 +1,119 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Layout from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Calendar, Clock, MapPin, QrCode, CheckCircle, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
+import { api } from "@/lib/api";
+import { getSessionUser } from "@/lib/session";
 
-const courts = [
-  { id: 1, name: "Terrain Padel A", type: "Padel", status: "available" },
-  { id: 2, name: "Terrain Padel B", type: "Padel", status: "available" },
-  { id: 3, name: "Terrain Tennis 1", type: "Tennis", status: "occupied" },
-  { id: 4, name: "Terrain Tennis 2", type: "Tennis", status: "available" },
-  { id: 5, name: "Terrain Padel C (SUMMA)", type: "Padel", status: "available" },
-  { id: 6, name: "Terrain Tennis 3 (SUMMA)", type: "Tennis", status: "available" },
-];
+type Court = {
+  id: number;
+  name: string;
+  sport: string;
+  status: "available" | "occupied" | "maintenance";
+  has_summa: number;
+  location: string;
+};
+
+type ReservationResult = {
+  id: number;
+  court_name: string;
+  sport: string;
+  reservation_date: string;
+  start_time: string;
+  end_time: string;
+  qr_token: string;
+};
 
 const timeSlots = ["08:00", "09:30", "11:00", "14:00", "15:30", "17:00", "18:30", "20:00"];
-
 const steps = ["Terrain", "Date & Heure", "Confirmation", "QR Code"];
+
+const addNinetyMinutes = (time: string) => {
+  const [hours, minutes] = time.split(":").map(Number);
+  const total = hours * 60 + minutes + 90;
+  const nextHours = String(Math.floor(total / 60)).padStart(2, "0");
+  const nextMinutes = String(total % 60).padStart(2, "0");
+  return `${nextHours}:${nextMinutes}`;
+};
+
+const todayDateString = () => new Date().toISOString().split("T")[0];
 
 const Reservation = () => {
   const [step, setStep] = useState(0);
+  const [courts, setCourts] = useState<Court[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
   const [selectedCourt, setSelectedCourt] = useState<number | null>(null);
   const [selectedDate, setSelectedDate] = useState("");
   const [selectedTime, setSelectedTime] = useState("");
+  const [confirmedReservation, setConfirmedReservation] = useState<ReservationResult | null>(null);
 
-  const court = courts.find((c) => c.id === selectedCourt);
+  useEffect(() => {
+    const loadCourts = async () => {
+      try {
+        const result = await api<{ courts: Court[] }>("/api/courts");
+        setCourts(result.courts);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Impossible de charger les terrains.");
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const handleConfirm = () => {
-    setStep(3);
-    toast.success("Réservation confirmée !");
+    void loadCourts();
+  }, []);
+
+  const court = useMemo(() => courts.find((c) => c.id === selectedCourt) ?? null, [courts, selectedCourt]);
+
+  const handleConfirm = async () => {
+    const user = getSessionUser();
+    if (!user) {
+      toast.error("Connectez-vous pour confirmer une reservation.");
+      return;
+    }
+
+    if (!selectedCourt || !selectedDate || !selectedTime) {
+      toast.error("Choisissez un terrain, une date et un creneau.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const result = await api<{ reservation: ReservationResult }>("/api/reservations", {
+        method: "POST",
+        authenticated: true,
+        body: JSON.stringify({
+          courtId: selectedCourt,
+          reservationDate: selectedDate,
+          startTime: selectedTime,
+          endTime: addNinetyMinutes(selectedTime),
+        }),
+      });
+
+      setConfirmedReservation(result.reservation);
+      setStep(3);
+      toast.success("Reservation confirmee.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Reservation impossible.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const resetFlow = () => {
+    setStep(0);
+    setSelectedCourt(null);
+    setSelectedDate("");
+    setSelectedTime("");
+    setConfirmedReservation(null);
   };
 
   return (
     <Layout>
       <div className="container py-12">
-        <h1 className="text-3xl font-display font-bold mb-2">Réservation de Terrains</h1>
-        <p className="text-muted-foreground mb-8">Réservez votre terrain en quelques étapes simples</p>
+        <h1 className="text-3xl font-display font-bold mb-2">Reservation de Terrains</h1>
+        <p className="text-muted-foreground mb-8">Reservez votre terrain en quelques etapes simples</p>
 
-        {/* Stepper */}
         <div className="flex items-center gap-2 mb-10 overflow-x-auto pb-2">
           {steps.map((s, i) => (
             <div key={s} className="flex items-center gap-2">
@@ -51,16 +128,20 @@ const Reservation = () => {
           ))}
         </div>
 
-        {/* Step 0: Court selection */}
-        {step === 0 && (
+        {loading && <div className="text-sm text-muted-foreground">Chargement des terrains...</div>}
+
+        {!loading && step === 0 && (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 animate-fade-in">
             {courts.map((c) => (
               <button
                 key={c.id}
-                disabled={c.status === "occupied"}
-                onClick={() => { setSelectedCourt(c.id); setStep(1); }}
+                disabled={c.status !== "available"}
+                onClick={() => {
+                  setSelectedCourt(c.id);
+                  setStep(1);
+                }}
                 className={`gradient-card rounded-xl p-5 border text-left transition-all ${
-                  c.status === "occupied"
+                  c.status !== "available"
                     ? "opacity-50 cursor-not-allowed border-border"
                     : "border-border hover:border-primary/40 cursor-pointer"
                 }`}
@@ -70,17 +151,16 @@ const Reservation = () => {
                   <span className={`text-xs px-2 py-1 rounded-full ${
                     c.status === "available" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"
                   }`}>
-                    {c.status === "available" ? "Disponible" : "Occupé"}
+                    {c.status === "available" ? "Disponible" : "Indisponible"}
                   </span>
                 </div>
                 <h3 className="font-semibold mb-1">{c.name}</h3>
-                <p className="text-sm text-muted-foreground">{c.type}</p>
+                <p className="text-sm text-muted-foreground">{c.sport} - {c.location}</p>
               </button>
             ))}
           </div>
         )}
 
-        {/* Step 1: Date & Time */}
         {step === 1 && (
           <div className="max-w-lg animate-fade-in space-y-6">
             <div>
@@ -91,12 +171,13 @@ const Reservation = () => {
                 type="date"
                 value={selectedDate}
                 onChange={(e) => setSelectedDate(e.target.value)}
+                min={todayDateString()}
                 className="w-full rounded-lg border border-border bg-card px-4 py-2.5 text-foreground"
               />
             </div>
             <div>
               <label className="flex items-center gap-2 text-sm font-medium mb-2">
-                <Clock size={16} className="text-primary" /> Créneau horaire
+                <Clock size={16} className="text-primary" /> Creneau horaire
               </label>
               <div className="grid grid-cols-4 gap-2">
                 {timeSlots.map((t) => (
@@ -123,10 +204,9 @@ const Reservation = () => {
           </div>
         )}
 
-        {/* Step 2: Confirmation */}
         {step === 2 && court && (
           <div className="max-w-lg gradient-card rounded-xl border border-border p-8 animate-fade-in">
-            <h2 className="font-display text-xl font-bold mb-6">Récapitulatif</h2>
+            <h2 className="font-display text-xl font-bold mb-6">Recapitulatif</h2>
             <div className="space-y-4 text-sm">
               <div className="flex justify-between py-2 border-b border-border">
                 <span className="text-muted-foreground">Terrain</span>
@@ -134,7 +214,7 @@ const Reservation = () => {
               </div>
               <div className="flex justify-between py-2 border-b border-border">
                 <span className="text-muted-foreground">Type</span>
-                <span className="font-medium">{court.type}</span>
+                <span className="font-medium">{court.sport}</span>
               </div>
               <div className="flex justify-between py-2 border-b border-border">
                 <span className="text-muted-foreground">Date</span>
@@ -142,30 +222,32 @@ const Reservation = () => {
               </div>
               <div className="flex justify-between py-2 border-b border-border">
                 <span className="text-muted-foreground">Heure</span>
-                <span className="font-medium">{selectedTime}</span>
+                <span className="font-medium">{selectedTime} - {addNinetyMinutes(selectedTime)}</span>
               </div>
             </div>
             <div className="flex gap-3 mt-8">
               <Button variant="outline" onClick={() => setStep(1)}>Modifier</Button>
-              <Button onClick={handleConfirm} className="glow-yellow">Confirmer la réservation</Button>
+              <Button onClick={handleConfirm} className="glow-yellow" disabled={submitting}>
+                {submitting ? "Confirmation..." : "Confirmer la reservation"}
+              </Button>
             </div>
           </div>
         )}
 
-        {/* Step 3: QR Code */}
-        {step === 3 && court && (
+        {step === 3 && confirmedReservation && (
           <div className="max-w-lg gradient-card rounded-xl border border-primary/20 p-8 text-center animate-fade-in">
             <CheckCircle className="text-green-400 mx-auto mb-4" size={48} />
-            <h2 className="font-display text-xl font-bold mb-2">Réservation Confirmée !</h2>
+            <h2 className="font-display text-xl font-bold mb-2">Reservation confirmee!</h2>
             <p className="text-sm text-muted-foreground mb-6">
-              {court.name} • {selectedDate} à {selectedTime}
+              {confirmedReservation.court_name} - {confirmedReservation.reservation_date} a {confirmedReservation.start_time}
             </p>
-            <div className="w-48 h-48 mx-auto bg-foreground/10 rounded-xl flex items-center justify-center border border-border mb-4">
+            <div className="w-48 h-48 mx-auto bg-foreground/10 rounded-xl flex flex-col items-center justify-center border border-border mb-4 gap-3">
               <QrCode className="text-primary" size={80} />
+              <span className="text-xs text-muted-foreground px-4 break-all">{confirmedReservation.qr_token}</span>
             </div>
-            <p className="text-xs text-muted-foreground">Présentez ce QR code à l'entrée du terrain</p>
-            <Button className="mt-6" onClick={() => { setStep(0); setSelectedCourt(null); setSelectedDate(""); setSelectedTime(""); }}>
-              Nouvelle réservation
+            <p className="text-xs text-muted-foreground">Presentez ce code a l'entree du terrain</p>
+            <Button className="mt-6" onClick={resetFlow}>
+              Nouvelle reservation
             </Button>
           </div>
         )}

@@ -1,37 +1,51 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import Layout from "@/components/Layout";
 import { Activity, Radio } from "lucide-react";
+import { toast } from "sonner";
+import { api } from "@/lib/api";
 
-const initialMatches = [
-  { id: 1, court: "Padel A (SUMMA)", player1: "Ahmed B.", player2: "Sami T.", score1: [6, 4, 2], score2: [3, 6, 1], set: 3, status: "live" },
-  { id: 2, court: "Tennis 1", player1: "Youssef K.", player2: "Mariem F.", score1: [6, 3], score2: [2, 5], set: 2, status: "live" },
-  { id: 3, court: "Padel C (SUMMA)", player1: "Aziz F.", player2: "Nabil M.", score1: [6, 6], score2: [4, 3], set: 2, status: "finished" },
-  { id: 4, court: "Tennis 2", player1: "Ines R.", player2: "Leila B.", score1: [0], score2: [0], set: 1, status: "upcoming" },
-];
+type Match = {
+  id: number;
+  court_name: string | null;
+  player1_name: string;
+  player2_name: string;
+  score1: number[];
+  score2: number[];
+  current_set: number;
+  status: "live" | "finished" | "upcoming";
+};
 
 const LiveScores = () => {
-  const [matches, setMatches] = useState(initialMatches);
-  const [tick, setTick] = useState(0);
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // Simulate live score updates
   useEffect(() => {
-    const interval = setInterval(() => {
-      setTick((t) => t + 1);
-      setMatches((prev) =>
-        prev.map((m) => {
-          if (m.status !== "live") return m;
-          const updated = { ...m, score1: [...m.score1], score2: [...m.score2] };
-          const lastIdx = updated.score1.length - 1;
-          if (Math.random() > 0.5) {
-            updated.score1[lastIdx] = Math.min(7, updated.score1[lastIdx] + 1);
-          } else {
-            updated.score2[lastIdx] = Math.min(7, updated.score2[lastIdx] + 1);
-          }
-          return updated;
-        })
-      );
-    }, 4000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+
+    const loadScores = async () => {
+      try {
+        const result = await api<{ matches: Match[] }>("/api/live-scores");
+        if (!cancelled) {
+          setMatches(result.matches);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          toast.error(error instanceof Error ? error.message : "Impossible de charger les scores.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadScores();
+    const interval = setInterval(() => void loadScores(), 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   return (
@@ -43,38 +57,43 @@ const LiveScores = () => {
             <Radio size={12} /> LIVE
           </span>
         </div>
-        <p className="text-muted-foreground mb-10">Mise à jour en temps réel via SUMMA & WebSocket (démo simulée)</p>
+        <p className="text-muted-foreground mb-10">Mise a jour en temps reel via l'API demo ULTIMA</p>
+
+        {loading && <div className="text-sm text-muted-foreground mb-6">Chargement des matchs...</div>}
 
         <div className="grid md:grid-cols-2 gap-6">
-          {matches.map((m) => (
-            <div key={m.id} className={`gradient-card rounded-xl border p-6 transition-all ${
-              m.status === "live" ? "border-primary/30 glow-yellow" : "border-border"
+          {matches.map((match) => (
+            <div key={match.id} className={`gradient-card rounded-xl border p-6 transition-all ${
+              match.status === "live" ? "border-primary/30 glow-yellow" : "border-border"
             }`}>
-              <div className="flex justify-between items-center mb-4">
+              <div className="flex justify-between items-center mb-4 gap-4">
                 <span className="text-xs text-muted-foreground flex items-center gap-1">
-                  <Activity size={12} /> {m.court}
+                  <Activity size={12} /> {match.court_name ?? "Terrain non assigne"}
                 </span>
                 <span className={`text-xs px-2 py-0.5 rounded-full ${
-                  m.status === "live" ? "bg-green-500/20 text-green-400" :
-                  m.status === "finished" ? "bg-muted text-muted-foreground" :
+                  match.status === "live" ? "bg-green-500/20 text-green-400" :
+                  match.status === "finished" ? "bg-muted text-muted-foreground" :
                   "bg-primary/20 text-primary"
                 }`}>
-                  {m.status === "live" ? "En cours" : m.status === "finished" ? "Terminé" : "À venir"}
+                  {match.status === "live" ? "En cours" : match.status === "finished" ? "Termine" : "A venir"}
                 </span>
               </div>
 
               <div className="space-y-3">
-                {[{ name: m.player1, scores: m.score1 }, { name: m.player2, scores: m.score2 }].map((p, i) => (
-                  <div key={i} className="flex items-center justify-between">
-                    <span className="font-medium text-sm">{p.name}</span>
+                {[
+                  { name: match.player1_name, scores: match.score1 },
+                  { name: match.player2_name, scores: match.score2 },
+                ].map((player) => (
+                  <div key={player.name} className="flex items-center justify-between gap-4">
+                    <span className="font-medium text-sm">{player.name}</span>
                     <div className="flex gap-2">
-                      {p.scores.map((s, si) => (
-                        <span key={si} className={`w-8 h-8 rounded flex items-center justify-center text-sm font-bold ${
-                          si === p.scores.length - 1 && m.status === "live"
+                      {player.scores.map((score, index) => (
+                        <span key={`${player.name}-${index}`} className={`w-8 h-8 rounded flex items-center justify-center text-sm font-bold ${
+                          index === player.scores.length - 1 && match.status === "live"
                             ? "bg-primary/20 text-primary"
                             : "bg-muted text-foreground"
                         }`}>
-                          {s}
+                          {score}
                         </span>
                       ))}
                     </div>
@@ -82,9 +101,9 @@ const LiveScores = () => {
                 ))}
               </div>
 
-              {m.status === "live" && (
+              {match.status === "live" && (
                 <div className="mt-4 text-xs text-muted-foreground">
-                  Set {m.set} • Mise à jour automatique
+                  Set {match.current_set} - rafraichissement automatique toutes les 5 secondes
                 </div>
               )}
             </div>

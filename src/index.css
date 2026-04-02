@@ -1,111 +1,111 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Orbitron:wght@400;500;600;700;800;900&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Orbitron:wght@400;500;600;700;800;900&display=swap');
-
 @layer base {
   :root {
-    /* Dark mode — bet365-inspired: dark charcoal + green accents */
-    --background: 160 10% 7%;
+    /* Dark mode: deep charcoal with purple accents */
+    --background: 258 20% 7%;
     --foreground: 0 0% 93%;
 
-    --card: 160 8% 11%;
+    --card: 258 18% 11%;
     --card-foreground: 0 0% 93%;
 
-    --popover: 160 8% 11%;
+    --popover: 258 18% 11%;
     --popover-foreground: 0 0% 93%;
 
-    --primary: 152 55% 36%;
+    --primary: 272 68% 61%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 155 25% 18%;
+    --secondary: 258 24% 18%;
     --secondary-foreground: 0 0% 90%;
 
-    --muted: 160 12% 15%;
-    --muted-foreground: 160 8% 55%;
+    --muted: 258 16% 15%;
+    --muted-foreground: 258 8% 62%;
 
-    --accent: 152 40% 22%;
+    --accent: 268 30% 22%;
     --accent-foreground: 0 0% 93%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 160 12% 18%;
-    --input: 160 12% 18%;
-    --ring: 152 55% 36%;
+    --border: 258 16% 19%;
+    --input: 258 16% 19%;
+    --ring: 272 68% 61%;
 
     --radius: 0.75rem;
 
-    --sidebar-background: 160 10% 8%;
+    --sidebar-background: 258 18% 8%;
     --sidebar-foreground: 0 0% 93%;
-    --sidebar-primary: 152 55% 36%;
+    --sidebar-primary: 272 68% 61%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 155 25% 16%;
+    --sidebar-accent: 258 24% 16%;
     --sidebar-accent-foreground: 0 0% 93%;
-    --sidebar-border: 160 12% 16%;
-    --sidebar-ring: 152 55% 36%;
+    --sidebar-border: 258 16% 16%;
+    --sidebar-ring: 272 68% 61%;
 
-    /* Custom tokens */
-    --ultima-dark: 160 10% 7%;
-    --ultima-olive-dark: 155 35% 14%;
-    --ultima-olive: 152 40% 22%;
-    --ultima-yellow: 50 100% 63%;
-    --gradient-hero: linear-gradient(135deg, hsl(160 10% 7%) 0%, hsl(155 30% 12%) 50%, hsl(152 35% 18%) 100%);
-    --gradient-card: linear-gradient(145deg, hsl(160 8% 11%) 0%, hsl(155 20% 10%) 100%);
-    --gradient-accent: linear-gradient(135deg, hsl(152 55% 36%) 0%, hsl(152 60% 30%) 100%);
-    --shadow-glow: 0 0 30px hsl(152 55% 36% / 0.2);
+    /* Custom tokens retained for existing component names */
+    --ultima-dark: 258 20% 7%;
+    --ultima-olive-dark: 264 26% 14%;
+    --ultima-olive: 268 30% 22%;
+    --ultima-yellow: 284 79% 69%;
+    --gradient-hero: linear-gradient(135deg, hsl(258 20% 7%) 0%, hsl(264 26% 12%) 52%, hsl(274 34% 18%) 100%);
+    --gradient-card: linear-gradient(145deg, hsl(258 18% 11%) 0%, hsl(266 18% 10%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(272 68% 61%) 0%, hsl(286 72% 56%) 100%);
+    --shadow-glow: 0 0 30px hsl(272 68% 61% / 0.24);
     --shadow-card: 0 8px 32px hsl(0 0% 0% / 0.3);
   }
 
   .light {
-    /* Light mode — 1xbet-inspired: white/blue palette */
-    --background: 214 32% 97%;
-    --foreground: 215 25% 15%;
+    /* Light mode: soft lavender with crisp purple accents */
+    --background: 270 38% 97%;
+    --foreground: 265 24% 18%;
 
     --card: 0 0% 100%;
-    --card-foreground: 215 25% 15%;
+    --card-foreground: 265 24% 18%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 215 25% 15%;
+    --popover-foreground: 265 24% 18%;
 
-    --primary: 213 76% 44%;
+    --primary: 270 72% 52%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 214 30% 92%;
-    --secondary-foreground: 215 25% 25%;
+    --secondary: 270 35% 93%;
+    --secondary-foreground: 265 24% 28%;
 
-    --muted: 214 25% 93%;
-    --muted-foreground: 215 15% 47%;
+    --muted: 270 26% 94%;
+    --muted-foreground: 265 12% 46%;
 
-    --accent: 213 50% 90%;
-    --accent-foreground: 213 76% 35%;
+    --accent: 272 52% 91%;
+    --accent-foreground: 270 64% 38%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 214 20% 88%;
-    --input: 214 20% 88%;
-    --ring: 213 76% 44%;
+    --border: 270 25% 88%;
+    --input: 270 25% 88%;
+    --ring: 270 72% 52%;
 
     --sidebar-background: 0 0% 100%;
-    --sidebar-foreground: 215 25% 15%;
-    --sidebar-primary: 213 76% 44%;
+    --sidebar-foreground: 265 24% 18%;
+    --sidebar-primary: 270 72% 52%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 213 50% 93%;
-    --sidebar-accent-foreground: 213 76% 35%;
-    --sidebar-border: 214 20% 90%;
-    --sidebar-ring: 213 76% 44%;
+    --sidebar-accent: 272 52% 93%;
+    --sidebar-accent-foreground: 270 64% 38%;
+    --sidebar-border: 270 25% 90%;
+    --sidebar-ring: 270 72% 52%;
 
-    --ultima-dark: 214 32% 97%;
-    --ultima-olive-dark: 213 50% 90%;
-    --ultima-olive: 213 60% 82%;
-    --ultima-yellow: 213 76% 44%;
-    --gradient-hero: linear-gradient(135deg, hsl(214 32% 97%) 0%, hsl(213 40% 94%) 50%, hsl(213 50% 90%) 100%);
-    --gradient-card: linear-gradient(145deg, hsl(0 0% 100%) 0%, hsl(213 30% 97%) 100%);
-    --gradient-accent: linear-gradient(135deg, hsl(213 76% 44%) 0%, hsl(213 80% 38%) 100%);
-    --shadow-glow: 0 0 30px hsl(213 76% 44% / 0.15);
-    --shadow-card: 0 8px 32px hsl(215 25% 15% / 0.08);
+    --ultima-dark: 270 38% 97%;
+    --ultima-olive-dark: 272 44% 92%;
+    --ultima-olive: 272 48% 85%;
+    --ultima-yellow: 270 72% 52%;
+    --gradient-hero: linear-gradient(135deg, hsl(270 38% 97%) 0%, hsl(274 42% 95%) 48%, hsl(280 48% 90%) 100%);
+    --gradient-card: linear-gradient(145deg, hsl(0 0% 100%) 0%, hsl(274 28% 97%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(270 72% 52%) 0%, hsl(286 72% 58%) 100%);
+    --shadow-glow: 0 0 30px hsl(270 72% 52% / 0.18);
+    --shadow-card: 0 8px 32px hsl(265 24% 15% / 0.08);
   }
 }
 
@@ -245,3 +245,4 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
