@@ -19,24 +19,26 @@ const queryClient = new QueryClient();
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Index />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/signup" element={<Signup />} />
-          <Route path="/reservation" element={<Reservation />} />
-          <Route path="/competitions" element={<Competitions />} />
-          <Route path="/live-scores" element={<LiveScores />} />
-          <Route path="/performance" element={<Performance />} />
-          <Route path="/smartplay-ai" element={<SmartPlayAI />} />
-          <Route path="/admin" element={<Admin />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
-    </TooltipProvider>
+    <ThemeProvider>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<Index />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/signup" element={<Signup />} />
+            <Route path="/reservation" element={<Reservation />} />
+            <Route path="/competitions" element={<Competitions />} />
+            <Route path="/live-scores" element={<LiveScores />} />
+            <Route path="/performance" element={<Performance />} />
+            <Route path="/smartplay-ai" element={<SmartPlayAI />} />
+            <Route path="/admin" element={<Admin />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </TooltipProvider>
+    </ThemeProvider>
   </QueryClientProvider>
 );
 
