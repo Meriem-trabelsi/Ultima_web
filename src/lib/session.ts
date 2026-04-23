@@ -6,8 +6,17 @@ export type SessionUser = {
   firstName: string;
   lastName: string;
   email: string;
-  role: "player" | "coach" | "admin";
+  role: "player" | "coach" | "admin" | "super_admin";
   status: string;
+  accountStatus: string;
+  platformRole: "member" | "super_admin";
+  membershipRole: "player" | "coach" | "admin" | null;
+  membershipStatus: string | null;
+  arenaId: number | null;
+  arenaName: string | null;
+  cinNumber?: string | null;
+  emailVerified?: boolean;
+  emailVerifiedAt?: string | null;
   createdAt: string;
 };
 

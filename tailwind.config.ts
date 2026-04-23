@@ -14,8 +14,8 @@ export default {
     },
     extend: {
       fontFamily: {
-        sans: ["Inter", "sans-serif"],
-        display: ["Orbitron", "sans-serif"],
+        sans: ["Segoe UI", "sans-serif"],
+        display: ["Segoe UI", "sans-serif"],
       },
       colors: {
         border: "hsl(var(--border))",

@@ -1,0 +1,228 @@
+ULTIMA PROJECT SETUP GUIDE (USER-FRIENDLY)
+=========================================
+
+This file explains how to run the project in the safest and easiest way.
+It covers:
+- Docker setup (recommended)
+- MySQL mode
+- PostgreSQL mode
+- Local (non-Docker) setup
+- Email verification/reset setup
+- Optional public-link setup with ngrok
+- Common issues and fixes
+
+--------------------------------------------------
+1) WHAT THIS PROJECT IS
+--------------------------------------------------
+- Frontend: React + Vite (http://localhost:5173)
+- API: Node/Express (http://localhost:3001)
+- Database: MySQL or PostgreSQL (switchable by env)
+- Email:
+  - Local demo inbox via Mailpit (Docker)
+  - Real SMTP (for real email delivery)
+
+--------------------------------------------------
+2) PREREQUISITES
+--------------------------------------------------
+Install:
+- Node.js 20+ (or 22+)
+- npm
+- Docker Desktop
+
+Optional (for public links):
+- ngrok
+
+--------------------------------------------------
+3) IMPORTANT FILES
+--------------------------------------------------
+- .env                         Main runtime config
+- docker-compose.yml           Main Docker stack (MySQL + API + Web + Mailpit)
+- docker-compose.postgres.yml  Optional PostgreSQL service
+- .env.localdb.example         Local DB example
+- .env.dockerdb.example        Local API against Docker DB example
+- scripts/start-with-ngrok.ps1 Auto-updates PUBLIC_WEB_BASE_URL then starts Docker
+
+--------------------------------------------------
+4) FASTEST START (RECOMMENDED)
+--------------------------------------------------
+Use Docker in MySQL mode (default):
+
+PowerShell:
+  docker compose up -d --build
+
+Then open:
+- App:     http://localhost:5173
+- API:     http://localhost:3001/api/health
+- Mailpit: http://localhost:8025
+
+Notes:
+- First run may take a few minutes.
+- Health endpoint should return status OK.
+
+--------------------------------------------------
+5) DATABASE MODES
+--------------------------------------------------
+A) MySQL mode (default)
+- Already configured in docker-compose.yml
+- DB container name: ultima-db
+- Host port: 3308 -> container 3306
+- DB name: ultima_demo
+
+B) PostgreSQL mode (supported)
+To run PostgreSQL container:
+
+  docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d postgres
+
+To run API in PostgreSQL mode with the PostgreSQL container:
+
+PowerShell (same shell session before compose up):
+  $env:DB_CLIENT = "postgres"
+  $env:PG_HOST = "postgres"
+  $env:PG_PORT = "5432"
+  $env:PG_DATABASE = "ultima_demo_pg"
+  $env:PG_USER = "postgres"
+  $env:PG_PASSWORD = "admin"
+  docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --force-recreate api web
+
+Check health:
+  Invoke-WebRequest -UseBasicParsing http://localhost:3001/api/health | Select-Object -Expand Content
+
+Expected db selection:
+  "selected":"postgres"
+
+C) Local PostgreSQL server (outside Docker)
+If you use your own local PostgreSQL service, set in .env:
+- DB_CLIENT=postgres
+- PG_HOST=127.0.0.1
+- PG_PORT=5432
+- PG_DATABASE=<your_db>
+- PG_USER=<your_user>
+- PG_PASSWORD=<your_pass_or_empty>
+
+Then run API locally (section 6).
+
+--------------------------------------------------
+6) RUN WITHOUT DOCKER (LOCAL DEV)
+--------------------------------------------------
+1) Install dependencies:
+   npm install
+
+2) Start API:
+   npm run server
+
+3) Start frontend in another terminal:
+   npm run dev
+
+Useful API variants:
+- npm run server:localdb
+- npm run server:dockerdb
+- npm run server:localdb:dev
+- npm run server:dockerdb:dev
+
+--------------------------------------------------
+7) EMAIL SETUP
+--------------------------------------------------
+A) Easiest demo email (local inbox)
+- Use Mailpit from Docker
+- Emails appear in http://localhost:8025
+- Great for demo/testing without sending real emails
+
+B) Real email delivery (SMTP)
+In .env set:
+- SMTP_HOST_DOCKER=smtp.gmail.com
+- SMTP_PORT=587
+- SMTP_SECURE=false
+- SMTP_USER=your_email@gmail.com
+- SMTP_PASS=your_app_password
+- SMTP_FROM=your_email@gmail.com
+
+Then restart:
+  docker compose down
+  docker compose up -d --build
+
+Gmail note:
+- Enable 2FA
+- Generate an App Password
+- Use the app password in SMTP_PASS
+
+--------------------------------------------------
+8) PUBLIC LINKS (OPTIONAL)
+--------------------------------------------------
+Why needed:
+- Email links with localhost only work on your PC.
+- For phone/external testing, use a public URL.
+
+Option A (automatic script, recommended):
+  npm run docker:up:public
+
+What it does:
+- Starts/reuses ngrok
+- Reads ngrok HTTPS URL
+- Writes PUBLIC_WEB_BASE_URL in .env
+- Starts Docker stack
+
+Option B (manual):
+1) Start ngrok: ngrok http 5173
+2) Copy HTTPS URL
+3) Set in .env:
+   PUBLIC_WEB_BASE_URL=https://<your-ngrok-url>.ngrok-free.dev
+4) Restart api/web:
+   docker compose up -d --force-recreate api web
+
+Important:
+- Free ngrok URLs change when session restarts.
+- Old email links can stop working after URL changes.
+
+--------------------------------------------------
+9) COMMON ISSUES + FIXES
+--------------------------------------------------
+Issue: ERR_NGROK_3200 endpoint offline
+Fix:
+- Start ngrok again
+- Update PUBLIC_WEB_BASE_URL
+- Recreate api/web
+- Generate a NEW email link/code
+
+Issue: "Blocked request. This host is not allowed"
+Fix:
+- Ensure vite server allows hosts (already configured in project)
+- Recreate web container if needed
+
+Issue: Vite proxy ECONNREFUSED /api/auth/login
+Cause:
+- API not running or unhealthy
+Fix:
+- Check: docker logs --tail 120 ultima-api
+- Check health: http://localhost:3001/api/health
+
+Issue: API unhealthy due to DB not found
+Fix:
+- Verify DB_CLIENT and DB connection env values
+- Ensure target DB exists and is reachable
+
+--------------------------------------------------
+10) BEFORE PUSHING TO GIT
+--------------------------------------------------
+Do not push secrets:
+- SMTP_PASS
+- JWT secrets used in production
+- Any personal credentials
+
+Recommended:
+- Keep real secrets only in local .env
+- Commit only example env files (.env.example, etc.)
+
+--------------------------------------------------
+11) QUICK DEMO CHECKLIST
+--------------------------------------------------
+1) docker compose up -d --build
+2) Open app on localhost:5173
+3) Check API health endpoint
+4) Sign up new account
+5) Verify email (Mailpit or real inbox)
+6) Login
+7) Make reservation
+8) Register in competition
+9) (Admin) finalize match
+
+If all above works, your demo is ready.

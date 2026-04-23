@@ -1,0 +1,15 @@
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY server ./server
+COPY src/assets ./src/assets
+COPY public ./public
+COPY .env ./.env
+
+EXPOSE 3001
+
+CMD ["node", "--env-file=.env", "server/index.mjs"]

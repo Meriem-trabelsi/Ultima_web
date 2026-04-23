@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import Layout from "@/components/Layout";
-import { Trophy, Users, Calendar, MapPin } from "lucide-react";
+import { Trophy, Users, Calendar, MapPin, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { getSessionUser } from "@/lib/session";
+import { Skeleton } from "@/components/ui/skeleton";
 
 type Competition = {
   id: number;
@@ -76,13 +78,32 @@ const Competitions = () => {
         <h1 className="text-3xl font-display font-bold mb-2">Competitions</h1>
         <p className="text-muted-foreground mb-10">Participez aux tournois et suivez les classements</p>
 
-        {loading && <div className="text-sm text-muted-foreground mb-6">Chargement des competitions...</div>}
-
         <div className="grid lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-4">
             <h2 className="font-display text-xl font-semibold mb-4 flex items-center gap-2">
               <Trophy className="text-primary" size={20} /> Tournois a venir
             </h2>
+            {loading && (
+              <div className="space-y-4 mb-2">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <div key={index} className="gradient-card rounded-xl border border-border p-5 space-y-4">
+                    <div className="flex justify-between items-start">
+                      <Skeleton className="h-6 w-48" />
+                      <Skeleton className="h-5 w-28 rounded-full" />
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <Skeleton className="h-4 w-28" />
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-4 w-20" />
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <Skeleton className="h-4 w-24" />
+                      <Skeleton className="h-9 w-28 rounded-md" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             {competitions.map((competition) => (
               <div key={competition.id} className="gradient-card rounded-xl border border-border p-5 hover:border-primary/30 transition-all">
                 <div className="flex justify-between items-start mb-3 gap-3">
@@ -99,10 +120,10 @@ const Competitions = () => {
                   <span className="flex items-center gap-1"><Users size={14} /> {competition.participants}/{competition.max_participants}</span>
                 </div>
                 <div className="flex items-center justify-between gap-4">
-                  <div className="w-full max-w-xs bg-muted rounded-full h-2">
-                    <div className="bg-primary h-2 rounded-full transition-all" style={{ width: `${(competition.participants / competition.max_participants) * 100}%` }} />
-                  </div>
-                  <Button size="sm" disabled={competition.status !== "open"} onClick={() => void handleRegister(competition.id)}>
+                  <Link to={`/competitions/${competition.id}`} className="text-xs font-bold uppercase tracking-widest text-primary hover:underline flex items-center gap-1">
+                    Voir Details <ArrowRight size={14} />
+                  </Link>
+                  <Button size="sm" className="h-9 px-6 font-bold uppercase tracking-tighter" disabled={competition.status !== "open"} onClick={() => void handleRegister(competition.id)}>
                     {competition.status === "open" ? "S'inscrire" : "Complet"}
                   </Button>
                 </div>
@@ -115,6 +136,20 @@ const Competitions = () => {
               <Trophy className="text-primary" size={20} /> Classement
             </h2>
             <div className="gradient-card rounded-xl border border-border overflow-hidden">
+              {loading && (
+                <div className="p-4 space-y-3">
+                  {Array.from({ length: 6 }).map((_, index) => (
+                    <div key={index} className="flex items-center gap-3">
+                      <Skeleton className="w-7 h-7 rounded-full" />
+                      <div className="flex-1 space-y-2">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-20" />
+                      </div>
+                      <Skeleton className="h-4 w-12" />
+                    </div>
+                  ))}
+                </div>
+              )}
               {leaderboard.map((player) => (
                 <div key={player.rank} className="flex items-center gap-3 px-4 py-3 border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                   <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${

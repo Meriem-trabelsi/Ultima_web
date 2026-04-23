@@ -8,13 +8,18 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 5173,
+    allowedHosts: true,
     proxy: {
       "/api": {
-        target: "http://localhost:3001",
+        target: process.env.API_URL ?? "http://localhost:3001",
+        changeOrigin: true,
+      },
+      "/public": {
+        target: process.env.API_URL ?? "http://localhost:3001",
         changeOrigin: true,
       },
       "/socket.io": {
-        target: "http://localhost:3001",
+        target: process.env.API_URL ?? "http://localhost:3001",
         ws: true,
       },
     },
