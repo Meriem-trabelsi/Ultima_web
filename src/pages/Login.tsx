@@ -30,12 +30,12 @@ const Login = () => {
     setLoading(true);
 
     try {
-      const result = await api<{ token: string; user: Parameters<typeof setSession>[1] }>("/api/auth/login", {
+      const result = await api<{ token: string; refreshToken: string; user: Parameters<typeof setSession>[1] }>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
 
-      setSession(result.token, result.user);
+      setSession(result.token, result.user, result.refreshToken);
       toast.success("Login successful.");
       navigate(
         ["admin", "super_admin"].includes(result.user.role)

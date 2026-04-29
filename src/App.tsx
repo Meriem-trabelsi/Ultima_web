@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -17,11 +17,19 @@ import SmartPlayAI from "./pages/SmartPlayAI";
 import Admin from "./pages/Admin";
 import CompetitionDetails from "./pages/CompetitionDetails";
 import Coach from "./pages/Coach";
+import Coaches from "./pages/Coaches";
+import CoachProfilePage from "./pages/CoachProfilePage";
+import CoachProfileEditor from "./pages/CoachProfileEditor";
+import CoachAvailability from "./pages/CoachAvailability";
+import CoachRequests from "./pages/CoachRequests";
+import CoachingRequests from "./pages/CoachingRequests";
 import Connections from "./pages/Connections";
 import NotFound from "./pages/NotFound";
 import About from "./pages/About";
 import ResetPassword from "./pages/ResetPassword";
 import VerifyEmail from "./pages/VerifyEmail";
+import ReservationChoice from "./pages/ReservationChoice";
+import CoachBooking from "./pages/CoachBooking";
 
 const queryClient = new QueryClient();
 
@@ -32,7 +40,7 @@ const App = () => (
         <TooltipProvider>
           <Toaster />
           <Sonner />
-          <BrowserRouter>
+          <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>
               <Route path="/" element={<Index />} />
               <Route path="/login" element={<Login />} />
@@ -40,11 +48,21 @@ const App = () => (
               <Route path="/about-us" element={<About />} />
               <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/verify-email" element={<VerifyEmail />} />
-              
+              <Route path="/padel" element={<Navigate to="/reservation" replace />} />
+              <Route path="/padel/:id" element={<Navigate to="/reservation" replace />} />
+
               {/* Protected Routes */}
-              <Route 
-                path="/reservation" 
-                element={<AuthGuard><Reservation /></AuthGuard>} 
+              <Route
+                path="/reservation"
+                element={<AuthGuard><ReservationChoice /></AuthGuard>}
+              />
+              <Route
+                path="/reservation/court"
+                element={<AuthGuard><Reservation /></AuthGuard>}
+              />
+              <Route
+                path="/reservation/coach"
+                element={<AuthGuard><CoachBooking /></AuthGuard>}
               />
               <Route 
                 path="/competitions" 
@@ -74,7 +92,32 @@ const App = () => (
                 path="/coach"
                 element={<AuthGuard requireCoach><Coach /></AuthGuard>}
               />
-              
+              {/* Coaching system */}
+              <Route
+                path="/coaches"
+                element={<AuthGuard><Coaches /></AuthGuard>}
+              />
+              <Route
+                path="/coaches/:id"
+                element={<AuthGuard><CoachProfilePage /></AuthGuard>}
+              />
+              <Route
+                path="/coach/profile"
+                element={<AuthGuard requireCoach><CoachProfileEditor /></AuthGuard>}
+              />
+              <Route
+                path="/coach/availability"
+                element={<AuthGuard requireCoach><CoachAvailability /></AuthGuard>}
+              />
+              <Route
+                path="/coach/requests"
+                element={<AuthGuard requireCoach><CoachRequests /></AuthGuard>}
+              />
+              <Route
+                path="/coaching-requests"
+                element={<AuthGuard><CoachingRequests /></AuthGuard>}
+              />
+
               {/* Admin section protected with role requirement */}
               <Route 
                 path="/admin" 

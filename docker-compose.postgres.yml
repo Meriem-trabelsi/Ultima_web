@@ -6,11 +6,11 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: admin
-      POSTGRES_DB: ultima_demo_pg
+      POSTGRES_DB: ultima_demo
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ultima_demo_pg"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ultima_demo"]
       interval: 5s
       timeout: 5s
       retries: 20

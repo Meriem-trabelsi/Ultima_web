@@ -2,7 +2,10 @@ import cors from "cors";
 import bcrypt from "bcryptjs";
 import express from "express";
 import jwt from "jsonwebtoken";
+import multer from "multer";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { createServer } from "node:http";
 import { Server as SocketIOServer } from "socket.io";
 import {
@@ -23,6 +26,7 @@ import {
   verifyEmailWithCode,
   verifyEmailWithToken,
   findUserByEmail,
+  getUserById,
   getAdminOverview,
   getArenaBillingSummary,
   listBillingPlans,
@@ -39,6 +43,7 @@ import {
   listCoachRelationshipsForUser,
   listCoachesForPlayer,
   listCoachRelationshipExpiryReminders,
+  listNotificationsForUser,
   getPerformanceForUser,
   initializeDatabase,
   listAnalysesForUser,
@@ -55,9 +60,13 @@ import {
   requestCoachRelationship,
   respondCoachRelationship,
   sanitizeUser,
+  persistRefreshToken,
+  consumeRefreshToken,
+  revokeRefreshTokensForUser,
   tickLiveMatches,
   upsertArenaSubscriptionFromProvider,
   updateAdminReservationStatus,
+  updateMembershipRole,
   updateMembershipStatus,
   deleteUser,
   getPlayerDashboardData,
@@ -65,7 +74,32 @@ import {
   finalizeMatch,
   createCoachSession,
   createOrUpdateCoachRelationshipSeed,
+  createNotification,
+  markNotificationRead,
   updateCoachRelationshipSettings,
+  listPadelPlaces,
+  getPadelPlace,
+  listPadelTerrains,
+  getPadelTerrain,
+  getPadelAvailability,
+  createPadelReservation,
+  getCoachProfile,
+  upsertCoachProfile,
+  updateCoachAvatar,
+  listArenasForCoachBooking,
+  listCoachProfiles,
+  getCoachPublicProfile,
+  getCoachAvailability,
+  setCoachAvailabilityRules,
+  addCoachAvailabilityException,
+  getCoachAvailableSlots,
+  createCoachingRequest,
+  respondToCoachingRequest,
+  listCoachingRequestsForCoach,
+  listCoachingRequestsForPlayer,
+  listCoachingSessionsForUser,
+  listAdminCoaches,
+  assignCoachToArena,
 } from "./arena-db.mjs";
 import {
   isMailerConfigured,
@@ -74,6 +108,31 @@ import {
   sendVerificationCodeEmail,
   sendVerificationEmail,
 } from "./mailer.mjs";
+import {
+  getMatchScore,
+  updateMatchScore,
+  getScoreEvents,
+  createScoreEvent,
+  getScoreCorrectionLogs,
+  listScoringMatches,
+  getRecentScoreActivity,
+} from "./scoring.mjs";
+import {
+  getPlayerStats,
+  getPlayerMatchHistory,
+  getPlayerReservationHistory,
+  getPlayerCompetitionHistory,
+  getPlayerAiAnalysis,
+  getPlatformStats,
+  getRevenueSummary,
+} from "./analytics.mjs";
+import {
+  getSmartPlayStatus,
+  createAnalysisJob,
+  listAnalysisJobs,
+  getMatchAnalysis,
+  getPlayerAiMetrics,
+} from "./smartplay.mjs";
 
 const app = express();
 const httpServer = createServer(app);
@@ -88,10 +147,46 @@ const JWT_SECRET = process.env.JWT_SECRET ?? "ultima-demo-secret";
 const WEBHOOK_SECRET = process.env.BILLING_WEBHOOK_SECRET ?? "";
 const WEBHOOK_SIGNATURE_SECRET = process.env.BILLING_WEBHOOK_SIGNATURE_SECRET ?? process.env.BILLING_SIGNATURE_SECRET ?? JWT_SECRET;
 const ENABLE_TEST_SEED = process.env.ENABLE_TEST_SEED === "1";
+const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS ?? 14);
+const MAX_VIDEO_UPLOAD_MB = Number(process.env.MAX_VIDEO_UPLOAD_MB ?? 2048);
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CIN_REGEX = /^\d{8}$/;
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
 const PUBLIC_WEB_BASE_URL = String(process.env.PUBLIC_WEB_BASE_URL ?? "").trim();
+const uploadsDir = path.resolve(process.cwd(), "uploads");
+fs.mkdirSync(uploadsDir, { recursive: true });
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadsDir),
+    filename: (_req, file, cb) => {
+      const safeName = String(file.originalname ?? "upload.mp4").replace(/[^a-zA-Z0-9._-]/g, "-");
+      cb(null, `${Date.now()}-${randomUUID()}-${safeName}`);
+    },
+  }),
+  limits: {
+    fileSize: MAX_VIDEO_UPLOAD_MB * 1024 * 1024,
+  },
+});
+
+const uploadImage = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadsDir),
+    filename: (_req, file, cb) => {
+      const safeName = String(file.originalname ?? "image.jpg").replace(/[^a-zA-Z0-9._-]/g, "-");
+      cb(null, `${Date.now()}-${randomUUID()}-${safeName}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB cap for images
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", "Only JPEG, PNG, WebP and GIF images are allowed"));
+    }
+  },
+});
 
 function getPublicWebBaseUrl(req) {
   if (PUBLIC_WEB_BASE_URL) {
@@ -224,6 +319,8 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use("/uploads", express.static(uploadsDir));
+
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     status: "ok",
@@ -259,6 +356,14 @@ function createToken(user) {
     JWT_SECRET,
     { expiresIn: "8h" }
   );
+}
+
+async function issueSession(user) {
+  const token = createToken(user);
+  const refreshToken = randomUUID();
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  await persistRefreshToken(user.id, refreshToken, expiresAt);
+  return { token, refreshToken, user: sanitizeUser(user) };
 }
 
 function requireAuth(req, res, next) {
@@ -330,60 +435,40 @@ app.get("/api/arenas", async (_req, res) => {
 });
 
 app.post("/api/auth/signup", async (req, res) => {
-  const { nom, prenom, email, password, role, arenaId, arenaName, arenaLocation, cinNumber } = req.body ?? {};
-  const normalizedRole = role === "admin" ? "admin" : role === "entraineur" ? "coach" : "player";
-  const normalizedEmail = String(email ?? "").trim().toLowerCase();
+  try {
+    const { nom, prenom, email, password, cinNumber } = req.body ?? {};
+    const normalizedEmail = String(email ?? "").trim().toLowerCase();
 
-  if (!email || !password) {
-    return res.status(400).json({ message: "Missing required fields" });
-  }
-  if (!EMAIL_REGEX.test(normalizedEmail)) {
-    return res.status(400).json({ message: "Invalid email format" });
-  }
-  if (!PASSWORD_REGEX.test(String(password))) {
-    return res.status(400).json({ message: "Password must be at least 8 chars, with upper/lowercase and a number" });
-  }
+    if (!email || !password) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+    if (!PASSWORD_REGEX.test(String(password))) {
+      return res.status(400).json({ message: "Password must be at least 8 chars, with upper/lowercase and a number" });
+    }
+    if (!nom || !prenom) {
+      return res.status(400).json({ message: "First name and last name are required" });
+    }
+    if (!CIN_REGEX.test(String(cinNumber ?? "").trim())) {
+      return res.status(400).json({ message: "CIN is required and must contain exactly 8 digits" });
+    }
 
-  if (normalizedRole === "admin" && !arenaName) {
-    return res.status(400).json({ message: "Arena name is required for admin signup" });
-  }
+    if (await findUserByEmail(normalizedEmail)) {
+      return res.status(409).json({ message: "Email already in use" });
+    }
 
-  if (normalizedRole !== "admin" && !arenaId) {
-    return res.status(400).json({ message: "Arena is required" });
-  }
+    const passwordHash = await bcrypt.hash(password, 10);
+    await createUser({
+      firstName: prenom,
+      lastName: nom,
+      email: normalizedEmail,
+      passwordHash,
+      membershipRole: "player",
+      cinNumber: String(cinNumber).trim(),
+    });
 
-  if (normalizedRole !== "admin" && (!nom || !prenom)) {
-    return res.status(400).json({ message: "First name and last name are required" });
-  }
-  if (normalizedRole !== "admin" && !CIN_REGEX.test(String(cinNumber ?? "").trim())) {
-    return res.status(400).json({ message: "CIN is required and must contain exactly 8 digits" });
-  }
-
-  if (await findUserByEmail(normalizedEmail)) {
-    return res.status(409).json({ message: "Email already in use" });
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-  const createdArena =
-    normalizedRole === "admin"
-      ? await createArena({
-          name: String(arenaName).trim(),
-          location: String(arenaLocation ?? arenaName).trim(),
-        })
-      : null;
-
-  const user = await createUser({
-    firstName: normalizedRole === "admin" ? "Admin" : prenom,
-    lastName: normalizedRole === "admin" ? String(arenaName).trim() : nom,
-    email: normalizedEmail,
-    passwordHash,
-    arenaId: createdArena ? createdArena.id : Number(arenaId),
-    membershipRole: normalizedRole,
-    cinNumber: normalizedRole === "admin" ? null : String(cinNumber).trim(),
-    emailVerifiedAt: normalizedRole === "admin" ? new Date().toISOString() : null,
-  });
-
-  if (normalizedRole !== "admin") {
     const verification = await requestEmailVerification(normalizedEmail);
     const verifyLink = verification.token
       ? `${getPublicWebBaseUrl(req)}/verify-email?token=${encodeURIComponent(verification.token)}`
@@ -422,10 +507,17 @@ app.post("/api/auth/signup", async (req, res) => {
       verificationCode: isLocalRequest(req) ? verifyCode : undefined,
       verificationLink: isLocalRequest(req) ? verifyLink : undefined,
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to sign up";
+    const lower = String(message).toLowerCase();
+    const status =
+      lower.includes("duplicate") || lower.includes("already") || lower.includes("unique")
+        ? 409
+        : lower.includes("invalid") || lower.includes("required")
+          ? 400
+          : 500;
+    return res.status(status).json({ message });
   }
-
-  const token = createToken(user);
-  return res.status(201).json({ token, user: sanitizeUser(user) });
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -451,8 +543,36 @@ app.post("/api/auth/login", async (req, res) => {
     return res.status(403).json({ message: "Please verify your email before logging in." });
   }
 
-  const token = createToken(user);
-  return res.json({ token, user: sanitizeUser(user) });
+  return res.json(await issueSession(user));
+});
+
+app.post("/api/auth/refresh", async (req, res) => {
+  try {
+    const refreshToken = String(req.body?.refreshToken ?? "").trim();
+    if (!refreshToken) {
+      return res.status(400).json({ message: "Refresh token is required" });
+    }
+    const record = await consumeRefreshToken(refreshToken);
+    if (!record) {
+      return res.status(401).json({ message: "Refresh token is invalid or expired" });
+    }
+    const user = await getUserById(Number(record.user_id));
+    if (!user || sanitizeUser(user).status !== "active") {
+      return res.status(401).json({ message: "User is unavailable for refresh" });
+    }
+    return res.json(await issueSession(user));
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to refresh session" });
+  }
+});
+
+app.post("/api/auth/logout", requireAuth, async (req, res) => {
+  try {
+    await revokeRefreshTokensForUser(req.user.sub);
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to log out" });
+  }
 });
 
 app.post("/api/auth/forgot-password", async (req, res) => {
@@ -624,7 +744,7 @@ app.get("/api/courts/:id/availability", requireAuth, async (req, res) => {
   }
 
   const court = await getCourtById(Number(req.params.id));
-  if (actor?.effective_role !== "super_admin" && actor?.arena_id && court?.arena_id !== actor.arena_id) {
+  if (!["player", "super_admin"].includes(actor?.effective_role) && actor?.arena_id && court?.arena_id !== actor.arena_id) {
     return res.status(403).json({ message: "You can only view availability for courts in your arena" });
   }
 
@@ -633,15 +753,16 @@ app.get("/api/courts/:id/availability", requireAuth, async (req, res) => {
 
 app.post("/api/participants/lookup", requireAuth, async (req, res) => {
   const actor = await attachActor(req);
-  const { emails = [] } = req.body ?? {};
+  const { emails = [], arenaId } = req.body ?? {};
+  const targetArenaId = Number(arenaId ?? actor?.arena_id);
 
-  if (!actor?.arena_id) {
+  if (!targetArenaId) {
     return res.status(400).json({ message: "Only arena members can add participants" });
   }
 
   const normalizedEmails = Array.isArray(emails) ? emails.filter((email) => typeof email === "string") : [];
   return res.json({
-    participants: await lookupParticipantsForArena(actor.arena_id, normalizedEmails),
+    participants: await lookupParticipantsForArena(targetArenaId, normalizedEmails),
   });
 });
 
@@ -650,39 +771,52 @@ app.get("/api/reservations/my", requireAuth, async (req, res) => {
 });
 
 app.post("/api/reservations", requireAuth, async (req, res) => {
-  const { courtId, reservationDate, startTime, endTime, notes, participantEmails } = req.body ?? {};
+  try {
+    const { courtId, reservationDate, startTime, endTime, notes, participantEmails } = req.body ?? {};
 
-  if (!courtId || !reservationDate || !startTime || !endTime) {
-    return res.status(400).json({ message: "Missing reservation fields" });
+    if (!courtId || !reservationDate || !startTime || !endTime) {
+      return res.status(400).json({ message: "Missing reservation fields" });
+    }
+
+    const reservationStart = parseReservationDateTime(reservationDate, startTime);
+    const reservationEnd = parseReservationDateTime(reservationDate, endTime);
+    if (!reservationStart || !reservationEnd || reservationEnd <= reservationStart) {
+      return res.status(400).json({ message: "Invalid reservation date or time" });
+    }
+
+    if (reservationStart <= new Date()) {
+      return res.status(400).json({ message: "You cannot reserve a past time slot" });
+    }
+
+    const court = await getCourtById(courtId);
+    if (!court) {
+      return res.status(404).json({ message: "Court not found" });
+    }
+
+    const reservation = await createReservation({
+      userId: req.user.sub,
+      courtId,
+      reservationDate,
+      startTime,
+      endTime,
+      qrToken: randomUUID(),
+      notes,
+      participantEmails: Array.isArray(participantEmails) ? participantEmails : [],
+    });
+
+    await createNotification({
+      userId: req.user.sub,
+      title: "Reservation confirmed",
+      body: `Your reservation for ${court.name} on ${reservationDate} from ${startTime} to ${endTime} is confirmed.`,
+      type: "reservation",
+      linkUrl: "/reservation",
+    });
+
+    return res.status(201).json({ reservation });
+  } catch (error) {
+    console.error("[POST /api/reservations]", error);
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create reservation" });
   }
-
-  const reservationStart = parseReservationDateTime(reservationDate, startTime);
-  const reservationEnd = parseReservationDateTime(reservationDate, endTime);
-  if (!reservationStart || !reservationEnd || reservationEnd <= reservationStart) {
-    return res.status(400).json({ message: "Invalid reservation date or time" });
-  }
-
-  if (reservationStart <= new Date()) {
-    return res.status(400).json({ message: "You cannot reserve a past time slot" });
-  }
-
-  const court = await getCourtById(courtId);
-  if (!court) {
-    return res.status(404).json({ message: "Court not found" });
-  }
-
-  const reservation = await createReservation({
-    userId: req.user.sub,
-    courtId,
-    reservationDate,
-    startTime,
-    endTime,
-    qrToken: randomUUID(),
-    notes,
-    participantEmails: Array.isArray(participantEmails) ? participantEmails : [],
-  });
-
-  return res.status(201).json({ reservation });
 });
 
 app.patch("/api/reservations/:id/cancel", requireAuth, async (req, res) => {
@@ -768,6 +902,31 @@ app.get("/public/tickets/:id/download", async (req, res) => {
     return res.status(200).send(pdfBuffer);
   } catch (error) {
     return res.status(400).json({ message: error instanceof Error ? error.message : "Invalid ticket link" });
+  }
+});
+
+app.post("/api/reservations/:id/pay", requireAuth, async (req, res) => {
+  try {
+    const reservationId = Number(req.params.id);
+    const { amount, currency = "TND", method = "simulated" } = req.body ?? {};
+    if (!reservationId || !amount) return res.status(400).json({ message: "reservationId and amount are required" });
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const existing = await pgPool.query("SELECT id FROM reservation_payments WHERE reservation_id = $1", [reservationId]);
+    if (existing.rows.length) {
+      await pgPool.query(
+        "UPDATE reservation_payments SET status='paid', method=$1, amount=$2, currency=$3, paid_at=NOW(), updated_at=NOW() WHERE reservation_id=$4",
+        [method, amount, currency, reservationId]
+      );
+    } else {
+      await pgPool.query(
+        "INSERT INTO reservation_payments (reservation_id, amount, currency, status, method, paid_at) VALUES ($1,$2,$3,'paid',$4,NOW())",
+        [reservationId, amount, currency, method]
+      );
+    }
+    await pgPool.query("UPDATE reservations SET payment_status='paid' WHERE id=$1", [reservationId]);
+    res.json({ success: true, reservationId, amount, currency, method, status: "paid" });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Payment failed" });
   }
 });
 
@@ -1113,6 +1272,27 @@ app.patch("/api/admin/users/:id/status", requireAuth, requireAdmin, async (req, 
   }
 });
 
+app.patch("/api/admin/users/:id/role", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) {
+      return res.status(401).json({ message: "User not found" });
+    }
+    const nextRole = String(req.body?.role ?? "").trim().toLowerCase();
+    const user = await updateMembershipRole(actor, Number(req.params.id), nextRole);
+    await createNotification({
+      userId: user.id,
+      title: "Role updated",
+      body: `Your arena role is now ${sanitizeUser(user).role}.`,
+      type: "account",
+      linkUrl: sanitizeUser(user).role === "coach" ? "/coach" : "/performance",
+    });
+    return res.json({ user: sanitizeUser(user) });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to update user role" });
+  }
+});
+
 app.delete("/api/admin/users/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
     const actor = await attachActor(req);
@@ -1197,23 +1377,163 @@ app.patch("/api/admin/reservations/:id/status", requireAuth, requireAdmin, async
   }
 });
 
+app.get("/api/notifications", requireAuth, async (req, res) => {
+  try {
+    const notifications = await listNotificationsForUser(req.user.sub);
+    return res.json({ notifications });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load notifications" });
+  }
+});
+
+app.patch("/api/notifications/:id/read", requireAuth, async (req, res) => {
+  try {
+    const notification = await markNotificationRead(req.user.sub, Number(req.params.id));
+    if (!notification) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+    return res.json({ notification });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to update notification" });
+  }
+});
+
 app.get("/api/ai/analyses", requireAuth, async (req, res) => {
   res.json({ analyses: await listAnalysesForUser(req.user.sub) });
 });
 
-app.post("/api/ai/analyses", requireAuth, async (req, res) => {
-  const { title, videoName } = req.body ?? {};
-  if (!title || !videoName) {
-    return res.status(400).json({ message: "title and videoName are required" });
+app.post("/api/ai/analyses", requireAuth, upload.single("video"), async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) {
+      return res.status(401).json({ message: "User not found" });
+    }
+    if (!["coach", "admin", "super_admin"].includes(actor.effective_role)) {
+      return res.status(403).json({ message: "Only coaches and admins can upload match videos" });
+    }
+
+    const title = String(req.body?.title ?? "").trim();
+    const subjectUserId = Number(req.body?.subjectUserId ?? 0);
+    const matchId = req.body?.matchId ? Number(req.body.matchId) : null;
+    if (!title || !req.file || !subjectUserId) {
+      return res.status(400).json({ message: "title, subjectUserId and video file are required" });
+    }
+
+    const analysis = await createAnalysis({
+      userId: subjectUserId,
+      title,
+      videoName: req.file.originalname,
+      uploaderUserId: actor.id,
+      subjectUserId,
+      matchId,
+      storagePath: `/uploads/${req.file.filename}`,
+      status: "pending_ai",
+      summary: "Video uploaded successfully. Waiting for the AI module to process this match.",
+    });
+
+    try {
+      await createNotification({
+        userId: subjectUserId,
+        title: "New match video uploaded",
+        body: `${actor.first_name} ${actor.last_name} uploaded a new video for your analysis queue.`,
+        type: "analysis",
+        linkUrl: "/smartplay-ai",
+      });
+    } catch (notificationError) {
+      console.warn("[ai/analyses] notification creation failed:", notificationError instanceof Error ? notificationError.message : notificationError);
+    }
+
+    return res.status(201).json({ analysis });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to upload analysis video" });
   }
+});
 
-  const analysis = await createAnalysis({
-    userId: req.user.sub,
-    title,
-    videoName,
-  });
+// ── Padel Places & Terrains ──────────────────────────────────────────────────
 
-  return res.status(201).json({ analysis });
+app.get("/api/padel/places", optionalAuth, async (req, res) => {
+  try {
+    const { city, region, search, indoor, outdoor } = req.query;
+    const places = await listPadelPlaces({ city, region, search, indoor, outdoor });
+    res.json({ places });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : "Unable to list padel places" });
+  }
+});
+
+app.get("/api/padel/places/slug/:slug", optionalAuth, async (req, res) => {
+  try {
+    const place = await getPadelPlace(req.params.slug);
+    if (!place) return res.status(404).json({ message: "Place not found" });
+    const terrains = await listPadelTerrains(place.id);
+    res.json({ place: { ...place, terrains } });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : "Unable to get padel place" });
+  }
+});
+
+app.get("/api/padel/places/:id/availability", optionalAuth, async (req, res) => {
+  try {
+    const place = await getPadelPlace(req.params.id);
+    if (!place) return res.status(404).json({ message: "Place not found" });
+    const { date, startTime, durationMinutes = "90" } = req.query;
+    if (!date) return res.status(400).json({ message: "date is required (YYYY-MM-DD)" });
+    const terrains = await getPadelAvailability(place.id, date, startTime, Number(durationMinutes));
+    res.json({ placeId: place.id, date, startTime: startTime ?? null, durationMinutes: Number(durationMinutes), terrains });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : "Unable to check availability" });
+  }
+});
+
+app.get("/api/padel/places/:id/terrains", optionalAuth, async (req, res) => {
+  try {
+    const place = await getPadelPlace(req.params.id);
+    if (!place) return res.status(404).json({ message: "Place not found" });
+    const terrains = await listPadelTerrains(place.id);
+    res.json({ terrains });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : "Unable to list terrains" });
+  }
+});
+
+app.get("/api/padel/places/:id", optionalAuth, async (req, res) => {
+  try {
+    const place = await getPadelPlace(req.params.id);
+    if (!place) return res.status(404).json({ message: "Place not found" });
+    const terrains = await listPadelTerrains(place.id);
+    res.json({ place: { ...place, terrains } });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : "Unable to get padel place" });
+  }
+});
+
+app.get("/api/padel/terrains/:id", optionalAuth, async (req, res) => {
+  try {
+    const terrain = await getPadelTerrain(req.params.id);
+    if (!terrain) return res.status(404).json({ message: "Terrain not found" });
+    res.json({ terrain });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : "Unable to get terrain" });
+  }
+});
+
+app.post("/api/padel/reservations", requireAuth, async (req, res) => {
+  try {
+    const { courtId, reservationDate, startTime, durationMinutes = 90 } = req.body ?? {};
+    if (!courtId || !reservationDate || !startTime) {
+      return res.status(400).json({ message: "courtId, reservationDate, and startTime are required" });
+    }
+    const reservation = await createPadelReservation({
+      userId: req.user.sub,
+      courtId: Number(courtId),
+      reservationDate,
+      startTime,
+      durationMinutes: Number(durationMinutes),
+    });
+    res.status(201).json({ reservation });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create reservation" });
+  }
 });
 
 io.on("connection", async (socket) => {
@@ -1224,6 +1544,481 @@ io.on("connection", async (socket) => {
     console.error("Unable to push initial live scores:", error);
   }
 });
+
+// ── Smart Scoring ────────────────────────────────────────────────────────────
+
+app.get("/api/matches/:id/score", optionalAuth, async (req, res) => {
+  try {
+    const score = await getMatchScore(Number(req.params.id));
+    if (!score) return res.status(404).json({ message: "Match not found" });
+    res.json({ score });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load score" });
+  }
+});
+
+app.patch("/api/matches/:id/score", requireAuth, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) return res.status(401).json({ message: "User not found" });
+    const role = actor.effective_role ?? actor.role;
+    const isAdmin = ["admin", "super_admin"].includes(role);
+    const isCoach = role === "coach";
+    if (!isAdmin && !isCoach) {
+      return res.status(403).json({ message: "Admins and coaches only" });
+    }
+    if (isCoach) {
+      const { default: pgPool } = await import("./pg-pool.mjs");
+      const { rows } = await pgPool.query(
+        `SELECT r.arena_id FROM reservations r
+         JOIN matches m ON m.reservation_id = r.id
+         WHERE m.id = $1`,
+        [Number(req.params.id)]
+      );
+      if (!rows.length || Number(rows[0].arena_id) !== Number(actor.arena_id)) {
+        return res.status(403).json({ message: "Coaches can only edit scores for matches in their arena" });
+      }
+    }
+    const { score1, score2, status, reason } = req.body ?? {};
+    const updated = await updateMatchScore({
+      matchId: Number(req.params.id),
+      score1,
+      score2,
+      status,
+      actorId: actor.id,
+      actorRole: role,
+      reason,
+    });
+    io.emit("scores:update", { matches: await listMatches() });
+    res.json({ score: updated });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to update score" });
+  }
+});
+
+app.get("/api/matches/:id/score-events", optionalAuth, async (req, res) => {
+  try {
+    const events = await getScoreEvents(Number(req.params.id), Number(req.query.limit ?? 50));
+    res.json({ events });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load events" });
+  }
+});
+
+app.post("/api/matches/:id/score-events", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { eventType, playerName, team, setNumber, source, confidence, metadata } = req.body ?? {};
+    const event = await createScoreEvent({
+      matchId: Number(req.params.id),
+      eventType,
+      playerName,
+      team,
+      setNumber,
+      source,
+      confidence,
+      metadata,
+    });
+    res.status(201).json({ event });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create event" });
+  }
+});
+
+app.get("/api/matches/:id/score-corrections", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const logs = await getScoreCorrectionLogs(Number(req.params.id));
+    res.json({ logs });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load correction logs" });
+  }
+});
+
+app.get("/api/admin/scoring", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) return res.status(401).json({ message: "User not found" });
+    const [matches, recentActivity] = await Promise.all([
+      listScoringMatches(actor, 50),
+      getRecentScoreActivity(10),
+    ]);
+    res.json({ matches, recentActivity });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load scoring data" });
+  }
+});
+
+// ── Player Analytics ──────────────────────────────────────────────────────────
+
+app.get("/api/player/stats", requireAuth, async (req, res) => {
+  try {
+    const stats = await getPlayerStats(req.user.sub);
+    res.json({ stats });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load player stats" });
+  }
+});
+
+app.get("/api/player/history/matches", requireAuth, async (req, res) => {
+  try {
+    const matches = await getPlayerMatchHistory(req.user.sub, Number(req.query.limit ?? 20));
+    res.json({ matches });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load match history" });
+  }
+});
+
+app.get("/api/player/history/reservations", requireAuth, async (req, res) => {
+  try {
+    const reservations = await getPlayerReservationHistory(req.user.sub, Number(req.query.limit ?? 20));
+    res.json({ reservations });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load reservation history" });
+  }
+});
+
+app.get("/api/player/history/competitions", requireAuth, async (req, res) => {
+  try {
+    const competitions = await getPlayerCompetitionHistory(req.user.sub);
+    res.json({ competitions });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load competition history" });
+  }
+});
+
+app.get("/api/player/ai-analysis", requireAuth, async (req, res) => {
+  try {
+    const data = await getPlayerAiAnalysis(req.user.sub);
+    res.json(data);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load AI analysis" });
+  }
+});
+
+app.get("/api/admin/platform-stats", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const stats = await getPlatformStats();
+    res.json({ stats });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load platform stats" });
+  }
+});
+
+app.get("/api/admin/revenue", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    const arenaId = actor?.platform_role === "super_admin" ? null : (actor?.arena_id ?? null);
+    const revenue = await getRevenueSummary(arenaId);
+    res.json(revenue);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load revenue" });
+  }
+});
+
+// ── SmartPlay AI Placeholder ──────────────────────────────────────────────────
+
+app.get("/api/smartplay/status", async (_req, res) => {
+  try {
+    const status = await getSmartPlayStatus();
+    res.json(status);
+  } catch {
+    res.json({ connected: false, message: "Unable to check AI service status." });
+  }
+});
+
+app.get("/api/smartplay/player/:playerId/analysis", requireAuth, async (req, res) => {
+  try {
+    const playerId = Number(req.params.playerId);
+    const matchId = req.query.matchId ? Number(req.query.matchId) : null;
+    const data = await getPlayerAiMetrics(playerId, matchId);
+    res.json(data);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load player AI metrics" });
+  }
+});
+
+app.get("/api/smartplay/match/:matchId/analysis", optionalAuth, async (req, res) => {
+  try {
+    const data = await getMatchAnalysis(Number(req.params.matchId));
+    res.json(data);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load match analysis" });
+  }
+});
+
+app.post("/api/smartplay/analysis-jobs", requireAuth, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) return res.status(401).json({ message: "User not found" });
+    const { userId, matchId, jobType } = req.body ?? {};
+    const targetUserId = userId ? Number(userId) : actor.id;
+    const job = await createAnalysisJob({
+      userId: targetUserId,
+      matchId: matchId ? Number(matchId) : null,
+      jobType: jobType ?? "full_match",
+      requestedByUserId: actor.id,
+    });
+    res.status(201).json({ job });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create analysis job" });
+  }
+});
+
+app.get("/api/smartplay/analysis-jobs", requireAuth, async (req, res) => {
+  try {
+    const jobs = await listAnalysisJobs(req.user.sub);
+    res.json({ jobs });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load analysis jobs" });
+  }
+});
+
+// ── Coaching: Coach self-management ──────────────────────────────────────────
+
+app.get("/api/coach/profile", requireAuth, async (req, res) => {
+  try {
+    const profile = await getCoachProfile(req.user.sub);
+    res.json({ profile });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load coach profile" });
+  }
+});
+
+app.patch("/api/coach/profile", requireAuth, async (req, res) => {
+  try {
+    const profile = await upsertCoachProfile(req.user.sub, req.user.sub, req.body);
+    res.json({ profile });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to update coach profile" });
+  }
+});
+
+app.post("/api/coach/profile/avatar", requireAuth, uploadImage.single("avatar"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+    const imageUrl = `/uploads/${req.file.filename}`;
+    await updateCoachAvatar(req.user.sub, imageUrl);
+    res.json({ imageUrl });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to upload avatar" });
+  }
+});
+
+app.get("/api/coach/availability", requireAuth, async (req, res) => {
+  try {
+    const availability = await getCoachAvailability(req.user.sub);
+    res.json(availability);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load availability" });
+  }
+});
+
+app.put("/api/coach/availability", requireAuth, async (req, res) => {
+  try {
+    const { rules } = req.body;
+    if (!Array.isArray(rules)) return res.status(400).json({ message: "rules must be an array" });
+    await setCoachAvailabilityRules(req.user.sub, rules);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to save availability" });
+  }
+});
+
+app.post("/api/coach/availability/exceptions", requireAuth, async (req, res) => {
+  try {
+    const exception = await addCoachAvailabilityException(req.user.sub, req.body);
+    res.status(201).json({ exception });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to add exception" });
+  }
+});
+
+app.get("/api/coach/requests", requireAuth, async (req, res) => {
+  try {
+    const requests = await listCoachingRequestsForCoach(req.user.sub);
+    res.json({ requests });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load requests" });
+  }
+});
+
+app.patch("/api/coach/requests/:id/respond", requireAuth, async (req, res) => {
+  try {
+    const result = await respondToCoachingRequest(req.user.sub, Number(req.params.id), req.body);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to respond to request" });
+  }
+});
+
+app.get("/api/coach/coaching-sessions", requireAuth, async (req, res) => {
+  try {
+    const sessions = await listCoachingSessionsForUser(req.user.sub);
+    res.json({ sessions });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load sessions" });
+  }
+});
+
+// ── Coaching: Player discovery & requests ─────────────────────────────────────
+
+app.get("/api/player/coaches", requireAuth, async (req, res) => {
+  try {
+    const { arenaId, search, expertise, language } = req.query;
+    const coaches = await listCoachProfiles({
+      arenaId: arenaId ? Number(arenaId) : undefined,
+      search: search || undefined,
+      expertise: expertise || undefined,
+      language: language || undefined,
+    });
+    res.json({ coaches });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load coaches" });
+  }
+});
+
+app.get("/api/player/coaches/:id", requireAuth, async (req, res) => {
+  try {
+    const profile = await getCoachPublicProfile(Number(req.params.id));
+    res.json({ profile });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Coach not found" });
+  }
+});
+
+app.get("/api/player/coaches/:id/slots", requireAuth, async (req, res) => {
+  try {
+    const { date } = req.query;
+    if (!date) return res.status(400).json({ message: "date query param required" });
+    const slots = await getCoachAvailableSlots(Number(req.params.id), date);
+    res.json({ slots });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load slots" });
+  }
+});
+
+app.post("/api/player/coaching-requests", requireAuth, async (req, res) => {
+  try {
+    const request = await createCoachingRequest(req.user.sub, req.body);
+    res.status(201).json({ request });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create coaching request" });
+  }
+});
+
+app.get("/api/player/coaching-requests", requireAuth, async (req, res) => {
+  try {
+    const requests = await listCoachingRequestsForPlayer(req.user.sub);
+    res.json({ requests });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load coaching requests" });
+  }
+});
+
+app.get("/api/player/coaching-sessions", requireAuth, async (req, res) => {
+  try {
+    const sessions = await listCoachingSessionsForUser(req.user.sub);
+    res.json({ sessions });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load coaching sessions" });
+  }
+});
+
+// ── Coaching: Admin management ────────────────────────────────────────────────
+
+app.get("/api/admin/coaches", requireAuth, async (req, res) => {
+  try {
+    const coaches = await listAdminCoaches(req.user.sub);
+    res.json({ coaches });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load coaches" });
+  }
+});
+
+app.post("/api/admin/coaches", requireAuth, async (req, res) => {
+  try {
+    const { coachUserId, ...profileData } = req.body;
+    if (!coachUserId) return res.status(400).json({ message: "coachUserId required" });
+    const profile = await upsertCoachProfile(req.user.sub, coachUserId, profileData);
+    res.status(201).json({ profile });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create coach profile" });
+  }
+});
+
+app.patch("/api/admin/coaches/:id/profile", requireAuth, async (req, res) => {
+  try {
+    const profile = await upsertCoachProfile(req.user.sub, Number(req.params.id), req.body);
+    res.json({ profile });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to update coach profile" });
+  }
+});
+
+app.post("/api/admin/assign-coach-club", requireAuth, async (req, res) => {
+  try {
+    const { coachUserId, arenaId } = req.body;
+    if (!coachUserId || !arenaId) return res.status(400).json({ message: "coachUserId and arenaId required" });
+    await assignCoachToArena(req.user.sub, coachUserId, arenaId);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to assign coach" });
+  }
+});
+
+// ── Coach booking wizard helpers ─────────────────────────────────────────────
+
+app.get("/api/player/coach-booking/arenas", requireAuth, async (req, res) => {
+  try {
+    const places = await listArenasForCoachBooking();
+    res.json({ places });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load arenas" });
+  }
+});
+
+app.get("/api/player/coach-booking/arenas/:id/courts", requireAuth, async (req, res) => {
+  try {
+    const arenaId = Number(req.params.id);
+    const { date, startTime, endTime } = req.query;
+    if (!date || !startTime || !endTime) {
+      return res.status(400).json({ message: "date, startTime and endTime are required" });
+    }
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const { rows: courts } = await pgPool.query(
+      `SELECT id, name, sport, status, price_per_hour, currency, court_type, has_lighting, surface_type
+       FROM courts
+       WHERE arena_id = $1 AND status = 'available'
+       ORDER BY id ASC`,
+      [arenaId]
+    );
+    const results = await Promise.all(courts.map(async (court) => {
+      const { rows: conflicts } = await pgPool.query(
+        `SELECT id FROM reservations
+         WHERE court_id = $1 AND reservation_date = $2::date AND status = 'confirmed'
+           AND start_time < $3::time AND end_time > $4::time`,
+        [court.id, date, endTime, startTime]
+      );
+      return { ...court, available: conflicts.length === 0 };
+    }));
+    res.json({ courts: results.filter((c) => c.available) });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load available courts" });
+  }
+});
+
+// ── Notifications read-all ────────────────────────────────────────────────────
+
+app.patch("/api/notifications/read-all", requireAuth, async (req, res) => {
+  try {
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    await pgPool.query("UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL", [req.user.sub]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to mark all read" });
+  }
+});
+
+// ── Live Score Loop ───────────────────────────────────────────────────────────
 
 setInterval(async () => {
   try {
@@ -1242,6 +2037,12 @@ const shutdown = async () => {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("unhandledRejection", (reason) => {
+  console.error("[CRASH PREVENTED] Unhandled rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[CRASH PREVENTED] Uncaught exception:", err);
+});
 
 httpServer.listen(PORT, () => {
   console.log(`ULTIMA demo API listening on http://localhost:${PORT}`);
@@ -1251,4 +2052,15 @@ httpServer.listen(PORT, () => {
     );
     console.log("[ULTIMA TEST ACCOUNTS] password source: env ULTIMA_TEST_PASSWORD");
   }
+});
+
+app.use((error, _req, res, next) => {
+  if (!error) {
+    return next();
+  }
+  if (error instanceof multer.MulterError) {
+    const status = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    return res.status(status).json({ message: error.message });
+  }
+  return res.status(500).json({ message: error instanceof Error ? error.message : "Unexpected server error" });
 });

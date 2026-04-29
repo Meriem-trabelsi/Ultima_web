@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import Layout from "@/components/Layout";
 import {
-  BarChart3, TrendingUp, Target, Flame,
-  MapPin, Trophy, ArrowRight, CheckCircle2, XCircle, Activity,
+  BarChart3, TrendingUp, Target, Flame, Trophy, Zap, Award,
+  Calendar, MapPin, Clock, CheckCircle2, XCircle, Star,
+  ArrowUpRight, ArrowDownRight, Activity, Users, RefreshCw,
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis,
-  PolarRadiusAxis, Radar,
+  PolarRadiusAxis, Radar, BarChart, Bar, LineChart, Line,
 } from "recharts";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -15,160 +16,229 @@ import { getSessionUser } from "@/lib/session";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 
-type PlayerMatch = {
-  id: number;
-  court_name: string;
-  arena_name: string;
-  score1: number[];
-  score2: number[];
-  winner_team: number;
-  scheduled_at: string;
-  team1_player1_id: number;
-  team1_player2_id: number;
-  team2_player1_id: number;
-  team2_player2_id: number;
-};
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-type PerformanceResponse = {
-  summary: {
-    rankingScore: number;
-    winRate: string;
-    streak: string;
-    matchesThisMonth: number;
-    wins: number;
-    losses: number;
+type PlayerStats = {
+  ranking_score: number;
+  wins: number;
+  losses: number;
+  total_played: number;
+  win_rate: number;
+  matches_total: number;
+  reservations_total: number;
+  reservations_paid: number;
+  competitions_total: number;
+  profile: {
+    service: number; return_skill: number; volley: number;
+    endurance: number; strategy: number; mental: number;
   } | null;
-  progress: Array<{ semaine: string; score: number; victoires: number; defaites: number }>;
-  radar: Array<{ skill: string; value: number }>;
+  progress: Array<{ label: string; score: number; wins: number; losses: number }>;
 };
 
-/* ── Count-up component ── */
-const CountUp = ({
-  target,
-  suffix = "",
-  duration = 1200,
-}: {
-  target: number;
-  suffix?: string;
-  duration?: number;
-}) => {
-  const [val, setVal] = useState(0);
-  useEffect(() => {
-    let start: number | null = null;
-    let raf: number;
-    const tick = (ts: number) => {
-      if (!start) start = ts;
-      const progress = Math.min((ts - start) / duration, 1);
-      setVal(Math.floor((1 - Math.pow(1 - progress, 3)) * target));
-      if (progress < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [target, duration]);
-  return <>{val.toLocaleString()}{suffix}</>;
+type MatchRecord = {
+  id: number; status: string; score1: number[]; score2: number[];
+  player1_name: string; player2_name: string; player1_id: number;
+  scheduled_at: string; court_name: string; arena_name: string;
+  competition_name?: string; is_winner: boolean; score_source: string;
 };
 
-const chartGrid = "hsl(var(--border))";
-const chartBg = "hsl(var(--card))";
+type ReservationRecord = {
+  id: number; reservation_date: string; start_time: string; end_time: string;
+  status: string; payment_status: string; court_name: string; arena_name: string;
+  total_price?: number; amount?: number; currency?: string;
+};
+
+type CompetitionRecord = {
+  competition_id: number; name: string; sport: string; start_date: string;
+  competition_status: string; registration_status: string; arena_name: string;
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 const chartPrimary = "hsl(var(--primary))";
+const chartOlive = "hsl(var(--ultima-olive, 80 40% 55%))";
+const chartGrid = "hsl(var(--border))";
 
-/* ── Custom tooltip ── */
-const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number }>; label?: string }) => {
+const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number; name?: string; color?: string }>; label?: string }) => {
   if (!active || !payload?.length) return null;
   return (
-    <div className="gradient-card rounded-xl border border-primary/20 px-4 py-3 text-xs backdrop-blur-md"
-      style={{ boxShadow: "0 8px 30px hsl(var(--primary)/0.15)" }}>
-      <p className="text-muted-foreground uppercase tracking-wider mb-1">{label}</p>
-      <p className="text-primary font-black text-base">{payload[0].value} pts</p>
+    <div className="gradient-card rounded-xl border border-primary/20 px-4 py-3 text-xs backdrop-blur-md shadow-xl">
+      <p className="text-muted-foreground mb-2 font-bold uppercase tracking-widest">{label}</p>
+      {payload.map((p, i) => (
+        <p key={i} style={{ color: p.color ?? chartPrimary }} className="font-bold">
+          {p.name && <span className="capitalize mr-1">{p.name}:</span>}{p.value}
+        </p>
+      ))}
     </div>
   );
 };
 
-const Performance = () => {
-  const [data, setData] = useState<PerformanceResponse | null>(null);
-  const [matches, setMatches] = useState<PlayerMatch[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState("all");
-  const user = getSessionUser();
+function StatCard({ icon: Icon, label, value, delta, sub, accent }: {
+  icon: typeof Trophy; label: string; value: string | number; delta?: number; sub?: string; accent?: string;
+}) {
+  return (
+    <div className="gradient-card rounded-2xl border border-border/50 p-5 flex items-center gap-4 hover:border-primary/30 transition-colors group">
+      <div className={`p-3 rounded-xl ${accent ?? "bg-primary/10"} group-hover:scale-110 transition-transform`}>
+        <Icon size={22} className="text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-muted-foreground uppercase tracking-widest font-bold mb-0.5">{label}</p>
+        <p className="text-2xl font-display font-bold text-foreground leading-tight flex items-center gap-2">
+          {value}
+          {delta !== undefined && delta !== 0 && (
+            <span className={`text-xs flex items-center gap-0.5 ${delta > 0 ? "text-green-400" : "text-red-400"}`}>
+              {delta > 0 ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
+              {Math.abs(delta)}
+            </span>
+          )}
+        </p>
+        {sub && <p className="text-xs text-muted-foreground mt-0.5">{sub}</p>}
+      </div>
+    </div>
+  );
+}
 
+// ── Section Tabs ──────────────────────────────────────────────────────────────
+
+const sections = [
+  { id: "dashboard", label: "Dashboard", icon: BarChart3 },
+  { id: "matches", label: "Match History", icon: Activity },
+  { id: "reservations", label: "Reservations", icon: Calendar },
+  { id: "competitions", label: "Competitions", icon: Trophy },
+];
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+const Performance = () => {
+  const user = getSessionUser();
+  const [tab, setTab] = useState("dashboard");
+  const [stats, setStats] = useState<PlayerStats | null>(null);
+  const [matches, setMatches] = useState<MatchRecord[]>([]);
+  const [reservations, setReservations] = useState<ReservationRecord[]>([]);
+  const [competitions, setCompetitions] = useState<CompetitionRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [resLoading, setResLoading] = useState(false);
+  const [compLoading, setCompLoading] = useState(false);
+
+  // Load stats on mount
   useEffect(() => {
-    const loadPerformance = async () => {
-      if (!user) { setLoading(false); return; }
+    if (!user) { setLoading(false); return; }
+    const load = async () => {
       try {
-        const [perf, m] = await Promise.all([
-          api<PerformanceResponse>("/api/performance/me", { authenticated: true }),
-          api<{ matches: PlayerMatch[] }>("/api/player/matches", { authenticated: true }),
+        const [statsResult] = await Promise.all([
+          api<{ stats: PlayerStats }>("/api/player/stats", { authenticated: true }),
         ]);
-        setData(perf);
-        setMatches(m.matches);
+        setStats(statsResult.stats);
       } catch {
-        toast.error("Impossible de charger vos statistiques.");
+        // Fallback to old endpoint
+        try {
+          const legacyResult = await api<{
+            summary: { rankingScore: number; winRate: string; streak: string; matchesThisMonth: number; wins: number; losses: number } | null;
+            progress: Array<{ semaine: string; score: number; victoires: number; defaites: number }>;
+            radar: Array<{ skill: string; value: number }>;
+          }>("/api/performance/me", { authenticated: true });
+          if (legacyResult.summary) {
+            setStats({
+              ranking_score: legacyResult.summary.rankingScore,
+              wins: legacyResult.summary.wins,
+              losses: legacyResult.summary.losses,
+              total_played: legacyResult.summary.wins + legacyResult.summary.losses,
+              win_rate: parseInt(legacyResult.summary.winRate) || 0,
+              matches_total: legacyResult.summary.matchesThisMonth,
+              reservations_total: 0,
+              reservations_paid: 0,
+              competitions_total: 0,
+              profile: legacyResult.radar.length
+                ? {
+                    service: legacyResult.radar.find((r) => r.skill === "Service")?.value ?? 0,
+                    return_skill: legacyResult.radar.find((r) => r.skill === "Return")?.value ?? 0,
+                    volley: legacyResult.radar.find((r) => r.skill === "Volley")?.value ?? 0,
+                    endurance: legacyResult.radar.find((r) => r.skill === "Endurance")?.value ?? 0,
+                    strategy: legacyResult.radar.find((r) => r.skill === "Strategy")?.value ?? 0,
+                    mental: legacyResult.radar.find((r) => r.skill === "Mental")?.value ?? 0,
+                  }
+                : null,
+              progress: legacyResult.progress.map((p) => ({
+                label: p.semaine,
+                score: p.score,
+                wins: p.victoires,
+                losses: p.defaites,
+              })),
+            });
+          }
+        } catch {
+          toast.error("Failed to load performance data.");
+        }
       } finally {
         setLoading(false);
       }
     };
-    void loadPerformance();
+    void load();
   }, [user?.id]);
 
-  const statCards = data?.summary
-    ? [
-        {
-          icon: TrendingUp,
-          label: "Points classement",
-          numericValue: data.summary.rankingScore,
-          suffix: "",
-          rawValue: String(data.summary.rankingScore),
-          color: "text-primary",
-          glowColor: "hsl(var(--primary))",
-        },
-        {
-          icon: Target,
-          label: "Taux de victoire",
-          numericValue: parseFloat(data.summary.winRate) || 0,
-          suffix: "%",
-          rawValue: data.summary.winRate,
-          color: "text-blue-400",
-          glowColor: "hsl(210 85% 60%)",
-        },
-        {
-          icon: Flame,
-          label: "Serie en cours",
-          numericValue: null,
-          suffix: "",
-          rawValue: data.summary.streak,
-          color: "text-orange-400",
-          glowColor: "hsl(30 90% 55%)",
-        },
-        {
-          icon: BarChart3,
-          label: "Matchs joues",
-          numericValue: data.summary.wins + data.summary.losses,
-          suffix: "",
-          rawValue: String(data.summary.wins + data.summary.losses),
-          color: "text-green-400",
-          glowColor: "hsl(142 72% 50%)",
-        },
-      ]
-    : [];
+  // Load section-specific data
+  useEffect(() => {
+    if (!user) return;
+    if (tab === "matches" && !matches.length) {
+      setMatchLoading(true);
+      api<{ matches: MatchRecord[] }>("/api/player/history/matches", { authenticated: true })
+        .then((r) => setMatches(r.matches))
+        .catch(() => {
+          api<{ matches: MatchRecord[] }>("/api/player/matches", { authenticated: true })
+            .then((r) => setMatches(r.matches))
+            .catch(() => {});
+        })
+        .finally(() => setMatchLoading(false));
+    }
+    if (tab === "reservations" && !reservations.length) {
+      setResLoading(true);
+      api<{ reservations: ReservationRecord[] }>("/api/player/history/reservations", { authenticated: true })
+        .then((r) => setReservations(r.reservations))
+        .catch(() => {
+          api<{ reservations: ReservationRecord[] }>("/api/reservations/my", { authenticated: true })
+            .then((r) => setReservations(r.reservations))
+            .catch(() => {});
+        })
+        .finally(() => setResLoading(false));
+    }
+    if (tab === "competitions" && !competitions.length) {
+      setCompLoading(true);
+      api<{ competitions: CompetitionRecord[] }>("/api/player/history/competitions", { authenticated: true })
+        .then((r) => setCompetitions(r.competitions))
+        .catch(() => {})
+        .finally(() => setCompLoading(false));
+    }
+  }, [tab, user?.id]);
 
-  const filteredMatches = useMemo(() => {
-    if (!user) return [];
-    return matches.filter((m) => {
-      const isWinner =
-        (m.winner_team === 1 && (m.team1_player1_id === user.id || m.team1_player2_id === user.id)) ||
-        (m.winner_team === 2 && (m.team2_player1_id === user.id || m.team2_player2_id === user.id));
-      if (filter === "win") return isWinner;
-      if (filter === "loss") return !isWinner;
-      return true;
-    });
-  }, [matches, filter, user?.id]);
+  const radarData = useMemo(() => {
+    if (!stats?.profile) return [];
+    const p = stats.profile;
+    return [
+      { skill: "Service", value: p.service },
+      { skill: "Return", value: p.return_skill },
+      { skill: "Volley", value: p.volley },
+      { skill: "Endurance", value: p.endurance },
+      { skill: "Strategy", value: p.strategy },
+      { skill: "Mental", value: p.mental },
+    ];
+  }, [stats?.profile]);
+
+  const winLossData = useMemo(() => {
+    if (!stats?.progress?.length) return [];
+    return stats.progress.slice(-12).map((p) => ({
+      week: p.label,
+      Wins: p.wins,
+      Losses: p.losses,
+    }));
+  }, [stats?.progress]);
 
   if (!user) {
     return (
       <Layout>
         <div className="container py-24 text-center">
-          <h1 className="text-3xl font-display font-bold mb-4">Statistiques indisponibles</h1>
-          <p className="text-muted-foreground mb-8">Connectez-vous pour voir vos statistiques de jeu.</p>
+          <BarChart3 size={48} className="text-muted-foreground mx-auto mb-4" />
+          <h2 className="text-2xl font-display font-bold">Sign in to see your analytics</h2>
         </div>
       </Layout>
     );
@@ -176,250 +246,317 @@ const Performance = () => {
 
   return (
     <Layout>
-      <div className="container py-12">
-        <header className="mb-12">
-          <h1 className="text-4xl md:text-5xl font-display font-bold text-gradient uppercase tracking-tighter mb-4">
-            Performance Player
-          </h1>
-          <p className="text-muted-foreground tracking-widest uppercase text-xs font-bold flex items-center gap-2">
-            <Activity className="text-primary" size={14} /> Statistiques & Historique de Jeu
-          </p>
-        </header>
-
-        {loading ? (
-          <div className="space-y-6">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="gradient-card rounded-2xl border border-border p-6 space-y-4">
-                  <Skeleton className="h-8 w-8 rounded-lg" />
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-9 w-20" />
-                </div>
-              ))}
+      <div className="container py-8 lg:py-12 space-y-8">
+        {/* Header */}
+        <div>
+          <div className="flex items-center gap-3 mb-2">
+            <div className="p-2 rounded-xl bg-primary/10">
+              <BarChart3 size={22} className="text-primary" />
             </div>
-            <div className="grid lg:grid-cols-2 gap-6">
-              <div className="gradient-card rounded-2xl border border-border p-8 space-y-4">
-                <Skeleton className="h-8 w-64 rounded-lg" />
-                <Skeleton className="h-[280px] w-full rounded-xl" />
-              </div>
-              <div className="gradient-card rounded-2xl border border-border p-8 space-y-4">
-                <Skeleton className="h-8 w-52 rounded-lg" />
-                <Skeleton className="h-[280px] w-full rounded-xl" />
-              </div>
+            <div>
+              <h1 className="text-3xl md:text-4xl font-display font-bold text-gradient uppercase tracking-tighter">
+                My Analytics
+              </h1>
+              <p className="text-muted-foreground text-sm">{user.firstName} {user.lastName} · Performance Dashboard</p>
             </div>
           </div>
-        ) : (
-          <>
-            {/* ── Stat cards ── */}
-            {!!statCards.length && (
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
-                {statCards.map((stat) => (
-                  <div
-                    key={stat.label}
-                    className="gradient-card rounded-2xl border border-border p-6 shadow-lg hover:border-primary/20 transition-all group"
-                    style={{
-                      boxShadow: `0 0 0 0 ${stat.glowColor}`,
-                      transition: "box-shadow 300ms ease, transform 300ms ease, border-color 300ms ease",
-                    }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.boxShadow = `0 0 30px ${stat.glowColor}28`;
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.boxShadow = "0 0 0 0 transparent";
-                    }}
-                  >
-                    <div className="flex items-center gap-3 mb-4">
-                      <div
-                        className="p-2 rounded-lg transition-all group-hover:scale-110"
-                        style={{ background: `${stat.glowColor}18` }}
-                      >
-                        <stat.icon className={stat.color} size={20} />
-                      </div>
-                      <span className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">
-                        {stat.label}
-                      </span>
+        </div>
+
+        {/* Section Tabs */}
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {sections.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setTab(s.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold whitespace-nowrap transition-all ${
+                tab === s.id
+                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
+                  : "bg-muted text-muted-foreground hover:bg-muted/80"
+              }`}
+            >
+              <s.icon size={14} />
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Dashboard Tab ── */}
+        {tab === "dashboard" && (
+          <div className="space-y-8">
+            {loading ? (
+              <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+                {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-2xl" />)}
+              </div>
+            ) : !stats ? (
+              <div className="text-center py-16">
+                <Activity size={48} className="text-muted-foreground mx-auto mb-4" />
+                <p className="text-muted-foreground">No performance data yet. Play some matches to see your stats.</p>
+              </div>
+            ) : (
+              <>
+                {/* Stat Cards */}
+                <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+                  <StatCard icon={Star} label="Ranking Score" value={stats.ranking_score} accent="bg-yellow-500/10" />
+                  <StatCard icon={CheckCircle2} label="Wins" value={stats.wins} accent="bg-green-500/10" />
+                  <StatCard icon={XCircle} label="Losses" value={stats.losses} accent="bg-red-500/10" />
+                  <StatCard
+                    icon={TrendingUp}
+                    label="Win Rate"
+                    value={`${stats.win_rate}%`}
+                    accent={stats.win_rate >= 50 ? "bg-green-500/10" : "bg-amber-500/10"}
+                  />
+                  <StatCard icon={Activity} label="Matches Played" value={stats.total_played} />
+                  <StatCard icon={Calendar} label="Reservations" value={stats.reservations_total} sub={`${stats.reservations_paid} paid`} />
+                  <StatCard icon={Trophy} label="Competitions" value={stats.competitions_total} />
+                  <StatCard
+                    icon={Target}
+                    label="Win Streak"
+                    value={stats.wins > 0 ? `${Math.min(stats.wins, 3)}` : "0"}
+                    sub="recent wins"
+                  />
+                </div>
+
+                {/* Progress Chart */}
+                {stats.progress.length > 0 && (
+                  <div className="gradient-card rounded-2xl border border-border/50 p-6">
+                    <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-5 flex items-center gap-2">
+                      <TrendingUp size={14} /> Ranking Progress
+                    </h3>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <AreaChart data={stats.progress}>
+                        <defs>
+                          <linearGradient id="rankGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={chartPrimary} stopOpacity={0.3} />
+                            <stop offset="95%" stopColor={chartPrimary} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} />
+                        <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                        <Tooltip content={<CustomTooltip />} />
+                        <Area type="monotone" dataKey="score" name="Ranking" stroke={chartPrimary} fill="url(#rankGrad)" strokeWidth={2} dot={{ fill: chartPrimary, r: 3 }} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                {/* Win/Loss Chart + Radar */}
+                <div className="grid lg:grid-cols-2 gap-6">
+                  {winLossData.length > 0 && (
+                    <div className="gradient-card rounded-2xl border border-border/50 p-6">
+                      <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-5 flex items-center gap-2">
+                        <BarChart3 size={14} /> Wins & Losses
+                      </h3>
+                      <ResponsiveContainer width="100%" height={200}>
+                        <BarChart data={winLossData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} />
+                          <XAxis dataKey="week" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                          <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="Wins" fill="#10b981" radius={[3, 3, 0, 0]} />
+                          <Bar dataKey="Losses" fill="#ef4444" radius={[3, 3, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
-                    <div className="text-3xl font-display font-bold">
-                      {stat.numericValue !== null ? (
-                        <CountUp target={stat.numericValue} suffix={stat.suffix} />
-                      ) : (
-                        stat.rawValue
-                      )}
+                  )}
+
+                  {radarData.length > 0 && (
+                    <div className="gradient-card rounded-2xl border border-border/50 p-6">
+                      <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-5 flex items-center gap-2">
+                        <Target size={14} /> Skill Profile
+                      </h3>
+                      <ResponsiveContainer width="100%" height={200}>
+                        <RadarChart data={radarData}>
+                          <PolarGrid stroke={chartGrid} />
+                          <PolarAngleAxis dataKey="skill" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+                          <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9 }} />
+                          <Radar name="Skills" dataKey="value" stroke={chartPrimary} fill={chartPrimary} fillOpacity={0.25} strokeWidth={2} />
+                          <Tooltip content={<CustomTooltip />} />
+                        </RadarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                </div>
+
+                {/* AI Placeholder */}
+                <div className="gradient-card rounded-2xl border border-purple-500/20 p-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="p-2 rounded-xl bg-purple-500/10">
+                      <Zap size={18} className="text-purple-400" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-sm flex items-center gap-2">
+                        SmartPlay AI Insights
+                        <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300">Coming Soon</span>
+                      </h3>
+                      <p className="text-xs text-muted-foreground">Advanced AI metrics will appear here once SmartPlay AI is connected</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                    {[
+                      { label: "Court Coverage", icon: MapPin },
+                      { label: "Reaction Speed", icon: Zap },
+                      { label: "Shot Accuracy", icon: Target },
+                      { label: "Movement Score", icon: Activity },
+                      { label: "Heatmap", icon: Flame },
+                    ].map(({ label, icon: Icon }) => (
+                      <div key={label} className="rounded-xl bg-purple-500/5 border border-purple-500/10 p-3 text-center">
+                        <Icon size={18} className="text-purple-400/50 mx-auto mb-2" />
+                        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+                        <p className="text-lg font-bold text-purple-300/40 mt-1">—</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── Match History Tab ── */}
+        {tab === "matches" && (
+          <div className="space-y-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Activity size={18} className="text-primary" /> Match History
+            </h3>
+            {matchLoading ? (
+              <div className="space-y-3">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-xl" />)}</div>
+            ) : !matches.length ? (
+              <div className="text-center py-16">
+                <Activity size={48} className="text-muted-foreground mx-auto mb-4" />
+                <p className="text-muted-foreground">No matches found. Your match history will appear here.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {matches.map((match) => (
+                  <div key={match.id}
+                    className={`gradient-card rounded-xl border p-4 flex items-center gap-4 ${
+                      match.is_winner ? "border-green-500/20" : "border-border/40"
+                    }`}
+                  >
+                    <div className={`p-2 rounded-xl flex-shrink-0 ${match.is_winner ? "bg-green-500/10" : "bg-red-500/10"}`}>
+                      {match.is_winner
+                        ? <CheckCircle2 size={18} className="text-green-400" />
+                        : <XCircle size={18} className="text-red-400" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-sm truncate">
+                        {match.player1_name} <span className="text-muted-foreground">vs</span> {match.player2_name}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">{match.court_name} · {match.arena_name}</p>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="font-mono font-bold text-sm">
+                        {(match.score1 ?? []).join("-")} / {(match.score2 ?? []).join("-")}
+                      </p>
+                      <p className="text-xs text-muted-foreground">{match.scheduled_at ? new Date(match.scheduled_at).toLocaleDateString() : "—"}</p>
+                    </div>
+                    <div className="flex-shrink-0">
+                      <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ${
+                        match.is_winner
+                          ? "bg-green-500/15 text-green-300"
+                          : "bg-red-500/15 text-red-300"
+                      }`}>
+                        {match.is_winner ? "Win" : "Loss"}
+                      </span>
                     </div>
                   </div>
                 ))}
               </div>
             )}
+          </div>
+        )}
 
-            {/* ── Charts ── */}
-            <div className="grid lg:grid-cols-2 gap-6 mb-12">
-              {/* ELO Area chart with gradient fill */}
-              <div className="gradient-card rounded-2xl border border-border p-8 overflow-hidden">
-                <h3 className="text-lg font-bold font-display uppercase tracking-tighter mb-8 bg-muted/40 p-3 rounded-lg flex items-center gap-2">
-                  <TrendingUp size={16} className="text-primary" /> Progression ELO Score
-                </h3>
-                <div className="h-[300px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={data?.progress} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                      <defs>
-                        <linearGradient id="eloGradient" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={chartPrimary} stopOpacity={0.45} />
-                          <stop offset="95%" stopColor={chartPrimary} stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} opacity={0.25} vertical={false} />
-                      <XAxis
-                        dataKey="semaine"
-                        stroke="hsl(var(--muted-foreground))"
-                        fontSize={10}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <YAxis
-                        stroke="hsl(var(--muted-foreground))"
-                        fontSize={10}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <Tooltip content={<CustomTooltip />} />
-                      <Area
-                        type="monotone"
-                        dataKey="score"
-                        stroke={chartPrimary}
-                        strokeWidth={2.5}
-                        fill="url(#eloGradient)"
-                        dot={{ fill: chartPrimary, r: 4, strokeWidth: 2, stroke: "hsl(var(--card))" }}
-                        activeDot={{ r: 6, stroke: chartPrimary, strokeWidth: 2, fill: "#fff" }}
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
+        {/* ── Reservations Tab ── */}
+        {tab === "reservations" && (
+          <div className="space-y-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Calendar size={18} className="text-primary" /> Reservation History
+            </h3>
+            {resLoading ? (
+              <div className="space-y-3">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-xl" />)}</div>
+            ) : !reservations.length ? (
+              <div className="text-center py-16">
+                <Calendar size={48} className="text-muted-foreground mx-auto mb-4" />
+                <p className="text-muted-foreground">No reservations yet. Book your first court!</p>
               </div>
-
-              {/* Radar chart */}
-              <div className="gradient-card rounded-2xl border border-border p-8">
-                <h3 className="text-lg font-bold font-display uppercase tracking-tighter mb-8 bg-muted/40 p-3 rounded-lg flex items-center gap-2">
-                  <Target size={16} className="text-blue-400" /> Profil Technique
-                </h3>
-                <div className="h-[300px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <RadarChart data={data?.radar}>
-                      <defs>
-                        <linearGradient id="radarGradient" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor={chartPrimary} stopOpacity={0.5} />
-                          <stop offset="100%" stopColor="hsl(210 85% 60%)" stopOpacity={0.3} />
-                        </linearGradient>
-                      </defs>
-                      <PolarGrid stroke={chartGrid} strokeOpacity={0.4} />
-                      <PolarAngleAxis
-                        dataKey="skill"
-                        tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-                      />
-                      <PolarRadiusAxis tick={false} axisLine={false} />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: chartBg,
-                          border: `1px solid ${chartGrid}`,
-                          borderRadius: "12px",
-                          fontSize: "12px",
-                        }}
-                      />
-                      <Radar
-                        name="Aptitude"
-                        dataKey="value"
-                        stroke={chartPrimary}
-                        strokeWidth={2}
-                        fill="url(#radarGradient)"
-                        fillOpacity={1}
-                      />
-                    </RadarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            </div>
-
-            {/* ── Match history ── */}
-            <div className="gradient-card rounded-2xl border border-border p-8 shadow-lg">
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10">
-                <h2 className="text-xl font-bold font-display uppercase tracking-tighter flex items-center gap-3">
-                  <Trophy size={20} className="text-yellow-400" /> Historique des Matchs
-                </h2>
-                <div className="flex gap-2">
-                  {(["all", "win", "loss"] as const).map((f) => (
-                    <Button
-                      key={f}
-                      variant={filter === f ? "default" : "outline"}
-                      size="sm"
-                      className="text-[10px] font-bold tracking-widest uppercase h-8"
-                      onClick={() => setFilter(f)}
-                    >
-                      {f === "all" ? "Tous" : f === "win" ? "Victoires" : "Defaites"}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                {filteredMatches.map((m) => {
-                  const isWinner =
-                    (m.winner_team === 1 && (m.team1_player1_id === user.id || m.team1_player2_id === user.id)) ||
-                    (m.winner_team === 2 && (m.team2_player1_id === user.id || m.team2_player2_id === user.id));
-                  return (
-                    <div
-                      key={m.id}
-                      className="flex flex-col md:flex-row items-center justify-between p-5 rounded-2xl border border-white/5 bg-muted/20 hover:bg-muted/35 hover:border-primary/15 transition-all gap-4 group"
-                    >
-                      <div className="flex items-center gap-5 w-full md:w-auto">
-                        <div
-                          className={`p-3 rounded-full transition-all group-hover:scale-110 ${
-                            isWinner ? "bg-green-500/15 text-green-400" : "bg-red-500/15 text-red-400"
-                          }`}
-                        >
-                          {isWinner ? <CheckCircle2 size={22} /> : <XCircle size={22} />}
-                        </div>
-                        <div>
-                          <div className="text-sm font-bold uppercase tracking-widest flex items-center gap-2">
-                            {isWinner ? "Victoire" : "Defaite"}
-                            <span className="text-xs text-muted-foreground font-normal tracking-normal capitalize">
-                              • {new Date(m.scheduled_at).toLocaleDateString("fr-FR")}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                            <MapPin size={12} /> {m.arena_name} — {m.court_name}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-4 bg-background/50 px-6 py-3 rounded-xl border border-border group-hover:border-primary/20 transition-all">
-                        <div className="text-2xl font-display font-black tracking-tighter text-gradient">
-                          {m.score1.join(" ")}
-                        </div>
-                        <div className="text-muted-foreground text-xs font-black">VS</div>
-                        <div className="text-2xl font-display font-black tracking-tighter">
-                          {m.score2.join(" ")}
-                        </div>
-                      </div>
-
-                      <div className="w-full md:w-auto flex justify-end">
-                        <Button variant="outline" size="sm" className="text-[10px] font-bold uppercase tracking-widest gap-2 hover:border-primary/40">
-                          Analyses <ArrowRight size={14} />
-                        </Button>
-                      </div>
+            ) : (
+              <div className="space-y-3">
+                {reservations.map((res) => (
+                  <div key={res.id} className="gradient-card rounded-xl border border-border/40 p-4 flex items-center gap-4">
+                    <div className="p-2 rounded-xl bg-primary/10 flex-shrink-0">
+                      <MapPin size={16} className="text-primary" />
                     </div>
-                  );
-                })}
-
-                {filteredMatches.length === 0 && (
-                  <div className="py-20 text-center border-2 border-dashed border-border rounded-3xl">
-                    <Trophy size={32} className="text-muted-foreground/30 mx-auto mb-4" />
-                    <p className="text-muted-foreground uppercase text-xs font-bold tracking-widest">
-                      Aucun match enregistre pour le moment.
-                    </p>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-sm truncate">{res.court_name}</p>
+                      <p className="text-xs text-muted-foreground">{res.arena_name}</p>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-sm font-medium">{res.reservation_date}</p>
+                      <p className="text-xs text-muted-foreground">{res.start_time} – {res.end_time}</p>
+                    </div>
+                    <div className="flex flex-col gap-1 items-end flex-shrink-0">
+                      <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ${
+                        res.status === "confirmed" ? "bg-green-500/15 text-green-300" : "bg-muted text-muted-foreground"
+                      }`}>{res.status}</span>
+                      <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ${
+                        res.payment_status === "paid" ? "bg-green-500/15 text-green-300" :
+                        res.payment_status === "pending" ? "bg-amber-500/15 text-amber-300" :
+                        "bg-muted text-muted-foreground"
+                      }`}>{res.payment_status ?? "pending"}</span>
+                    </div>
+                    {(res.total_price || res.amount) && (
+                      <p className="text-sm font-bold text-primary flex-shrink-0">
+                        {(res.total_price ?? res.amount ?? 0).toFixed(3)} {res.currency ?? "TND"}
+                      </p>
+                    )}
                   </div>
-                )}
+                ))}
               </div>
-            </div>
-          </>
+            )}
+          </div>
+        )}
+
+        {/* ── Competitions Tab ── */}
+        {tab === "competitions" && (
+          <div className="space-y-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+              <Trophy size={18} className="text-primary" /> Competition History
+            </h3>
+            {compLoading ? (
+              <div className="space-y-3">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-xl" />)}</div>
+            ) : !competitions.length ? (
+              <div className="text-center py-16">
+                <Trophy size={48} className="text-muted-foreground mx-auto mb-4" />
+                <p className="text-muted-foreground">You haven't joined any competitions yet.</p>
+                <Button variant="outline" className="mt-4" onClick={() => window.location.href = "/competitions"}>
+                  Browse Competitions
+                </Button>
+              </div>
+            ) : (
+              <div className="grid sm:grid-cols-2 gap-4">
+                {competitions.map((comp) => (
+                  <div key={comp.competition_id} className="gradient-card rounded-xl border border-border/40 p-5 hover:border-primary/30 transition-colors">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="font-bold text-sm truncate">{comp.name}</p>
+                        <p className="text-xs text-muted-foreground">{comp.arena_name}</p>
+                      </div>
+                      <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ml-2 flex-shrink-0 ${
+                        comp.registration_status === "registered"
+                          ? "bg-green-500/15 text-green-300"
+                          : "bg-muted text-muted-foreground"
+                      }`}>{comp.registration_status}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                      <span className="flex items-center gap-1"><Trophy size={10} />{comp.sport}</span>
+                      <span className="flex items-center gap-1"><Calendar size={10} />{comp.start_date}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
     </Layout>

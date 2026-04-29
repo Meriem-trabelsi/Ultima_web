@@ -1,21 +1,14 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import Layout from "@/components/Layout";
 import { Eye, EyeOff, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { setSession } from "@/lib/session";
 import { useLocale } from "@/i18n/locale";
-
-type Arena = {
-  id: number;
-  name: string;
-  location: string;
-};
 
 const Signup = () => {
   const [form, setForm] = useState({
@@ -24,37 +17,13 @@ const Signup = () => {
     email: "",
     password: "",
     cinNumber: "",
-    role: "joueur",
-    arenaId: "",
-    arenaName: "",
-    arenaLocation: "",
   });
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [arenas, setArenas] = useState<Arena[]>([]);
   const [loading, setLoading] = useState(false);
-  const [loadingArenas, setLoadingArenas] = useState(true);
   const navigate = useNavigate();
   const { t } = useLocale();
-
-  useEffect(() => {
-    const loadArenas = async () => {
-      try {
-        const result = await api<{ arenas: Arena[] }>("/api/arenas");
-        setArenas(result.arenas);
-        if (result.arenas[0]) {
-          setForm((current) => ({ ...current, arenaId: current.arenaId || String(result.arenas[0].id) }));
-        }
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Unable to load arenas.");
-      } finally {
-        setLoadingArenas(false);
-      }
-    };
-
-    void loadArenas();
-  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,6 +54,7 @@ const Signup = () => {
         user?: Parameters<typeof setSession>[1];
         requiresEmailVerification?: boolean;
         message?: string;
+        verificationCode?: string;
         verificationLink?: string;
       }>("/api/auth/signup", {
         method: "POST",
@@ -105,7 +75,16 @@ const Signup = () => {
       if (result.verificationLink) {
         toast.message(`Dev link: ${result.verificationLink}`);
       }
-      navigate(`/verify-email?email=${encodeURIComponent(form.email.trim().toLowerCase())}`);
+      const params = new URLSearchParams({
+        email: form.email.trim().toLowerCase(),
+      });
+      if (result.verificationCode) {
+        params.set("code", result.verificationCode);
+      }
+      if (result.verificationLink) {
+        params.set("devLink", result.verificationLink);
+      }
+      navigate(`/verify-email?${params.toString()}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to sign up.");
     } finally {
@@ -189,30 +168,7 @@ const Signup = () => {
                 className="mt-1.5"
               />
             </div>
-            <div>
-              <Label>{t("auth.role")}</Label>
-              <Select value={form.role} onValueChange={(role) => setForm({ ...form, role })}>
-                <SelectTrigger className="mt-1.5"><SelectValue placeholder={t("auth.role")} /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="joueur">{t("auth.role.player")}</SelectItem>
-                  <SelectItem value="entraineur">{t("auth.role.coach")}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>{t("auth.arena")}</Label>
-              <Select value={form.arenaId} onValueChange={(arenaId) => setForm({ ...form, arenaId })} disabled={loadingArenas || arenas.length === 0}>
-                <SelectTrigger className="mt-1.5"><SelectValue placeholder={t("auth.chooseArena")} /></SelectTrigger>
-                <SelectContent>
-                  {arenas.map((arena) => (
-                    <SelectItem key={arena.id} value={String(arena.id)}>
-                      {arena.name} - {arena.location}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <Button type="submit" className="w-full glow-yellow" disabled={loading || loadingArenas || !form.arenaId}>
+            <Button type="submit" className="w-full glow-yellow" disabled={loading}>
               <UserPlus size={18} className="mr-2" /> {loading ? t("auth.signup.loading") : t("auth.signup.submit")}
             </Button>
           </form>
