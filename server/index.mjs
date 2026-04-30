@@ -153,6 +153,10 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CIN_REGEX = /^\d{8}$/;
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
 const PUBLIC_WEB_BASE_URL = String(process.env.PUBLIC_WEB_BASE_URL ?? "").trim();
+const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY ?? "").trim();
+const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
+// TND is not a native Stripe currency — convert to EUR (approx 1 TND = 0.30 EUR)
+const TND_TO_EUR_RATE = 0.30;
 const uploadsDir = path.resolve(process.cwd(), "uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
 
@@ -877,6 +881,15 @@ app.get("/api/reservations/:id/ticket.pdf", requireAuth, async (req, res) => {
     if (!actor) {
       return res.status(401).json({ message: "User not found" });
     }
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const { rows: payRows } = await pgPool.query(
+      "SELECT payment_status FROM reservations WHERE id = $1",
+      [Number(req.params.id)]
+    );
+    if (!payRows.length) return res.status(404).json({ message: "Reservation not found" });
+    if (payRows[0].payment_status !== "paid") {
+      return res.status(402).json({ message: "Payment required before downloading your ticket." });
+    }
     const ticket = await getReservationTicketDetails(Number(req.params.id), actor);
     const pdfBuffer = generateReservationTicketPdfBuffer(ticket);
     res.setHeader("Content-Type", "application/pdf");
@@ -928,6 +941,292 @@ app.post("/api/reservations/:id/pay", requireAuth, async (req, res) => {
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : "Payment failed" });
   }
+});
+
+// ── Stripe Payments ───────────────────────────────────────────────────────────
+
+// POST /api/payments/reservation/:id/checkout
+// Creates a Stripe checkout session for a confirmed court reservation.
+app.post("/api/payments/reservation/:id/checkout", requireAuth, async (req, res) => {
+  if (!STRIPE_SECRET_KEY) {
+    return res.status(503).json({ message: "Stripe is not configured. Add STRIPE_SECRET_KEY to .env." });
+  }
+  try {
+    const { default: Stripe } = await import("stripe");
+    const stripe = new Stripe(STRIPE_SECRET_KEY);
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const reservationId = Number(req.params.id);
+
+    const { rows } = await pgPool.query(
+      `SELECT r.*, c.name AS court_name, c.price_per_hour, a.name AS arena_name
+       FROM reservations r
+       JOIN courts c ON c.id = r.court_id
+       JOIN arenas a ON a.id = r.arena_id
+       WHERE r.id = $1 AND r.user_id = $2`,
+      [reservationId, req.user.sub]
+    );
+    if (!rows.length) return res.status(404).json({ message: "Reservation not found" });
+    const reservation = rows[0];
+    if (reservation.payment_status === "paid") {
+      return res.status(400).json({ message: "This reservation is already paid" });
+    }
+
+    // Calculate duration in hours
+    const [sh, sm] = String(reservation.start_time).split(":").map(Number);
+    const [eh, em] = String(reservation.end_time).split(":").map(Number);
+    const durationHours = ((eh * 60 + em) - (sh * 60 + sm)) / 60;
+    const tndAmount = Number(reservation.price_per_hour ?? 0) * durationHours;
+    const eurCents = Math.round(tndAmount * TND_TO_EUR_RATE * 100);
+
+    const baseUrl = getPublicWebBaseUrl(req);
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [{
+        price_data: {
+          currency: "eur",
+          product_data: {
+            name: `Court: ${reservation.court_name} — ${reservation.arena_name}`,
+            description: `${reservation.reservation_date} · ${String(reservation.start_time).slice(0,5)}–${String(reservation.end_time).slice(0,5)}`,
+          },
+          unit_amount: eurCents,
+        },
+        quantity: 1,
+      }],
+      mode: "payment",
+      success_url: `${baseUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}&type=reservation&id=${reservationId}`,
+      cancel_url: `${baseUrl}/payment/cancel?type=reservation&id=${reservationId}`,
+      metadata: { type: "reservation", reservationId: String(reservationId) },
+    });
+
+    await pgPool.query("UPDATE reservations SET stripe_session_id = $1 WHERE id = $2", [session.id, reservationId]);
+    return res.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create checkout session" });
+  }
+});
+
+// POST /api/payments/coaching-request/:id/checkout
+// Creates a Stripe checkout session for an accepted coaching request (court + coach fee).
+app.post("/api/payments/coaching-request/:id/checkout", requireAuth, async (req, res) => {
+  if (!STRIPE_SECRET_KEY) {
+    return res.status(503).json({ message: "Stripe is not configured. Add STRIPE_SECRET_KEY to .env." });
+  }
+  try {
+    const { default: Stripe } = await import("stripe");
+    const stripe = new Stripe(STRIPE_SECRET_KEY);
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const requestId = Number(req.params.id);
+
+    const { rows } = await pgPool.query(
+      `SELECT cr.*,
+              CONCAT(u.first_name,' ',u.last_name) AS coach_name,
+              cp.hourly_rate AS coach_hourly_rate,
+              cp.currency AS coach_currency,
+              c.name AS court_name, c.price_per_hour AS court_price,
+              a.name AS arena_name
+       FROM coaching_requests cr
+       JOIN users u ON u.id = cr.coach_user_id
+       LEFT JOIN coach_profiles cp ON cp.user_id = cr.coach_user_id
+       LEFT JOIN courts c ON c.id = cr.preferred_court_id
+       LEFT JOIN arenas a ON a.id = cr.arena_id
+       WHERE cr.id = $1 AND cr.player_user_id = $2`,
+      [requestId, req.user.sub]
+    );
+    if (!rows.length) return res.status(404).json({ message: "Coaching request not found" });
+    const cr = rows[0];
+    if (cr.status !== "accepted") return res.status(400).json({ message: "Only accepted requests can be paid" });
+    if (cr.payment_status === "paid") return res.status(400).json({ message: "Already paid" });
+
+    const [sh, sm] = String(cr.requested_start_time).split(":").map(Number);
+    const [eh, em] = String(cr.requested_end_time).split(":").map(Number);
+    const durationHours = ((eh * 60 + em) - (sh * 60 + sm)) / 60;
+
+    const coachFee = Number(cr.coach_hourly_rate ?? 0) * durationHours;
+    const courtFee = Number(cr.court_price ?? 0) * durationHours;
+    const totalTND = coachFee + courtFee;
+    const totalEurCents = Math.round(totalTND * TND_TO_EUR_RATE * 100);
+
+    const baseUrl = getPublicWebBaseUrl(req);
+    const lineItems = [];
+
+    if (coachFee > 0) {
+      lineItems.push({
+        price_data: {
+          currency: "eur",
+          product_data: {
+            name: `Coach session: ${cr.coach_name}`,
+            description: `${cr.requested_date} · ${String(cr.requested_start_time).slice(0,5)}–${String(cr.requested_end_time).slice(0,5)}`,
+          },
+          unit_amount: Math.round(coachFee * TND_TO_EUR_RATE * 100),
+        },
+        quantity: 1,
+      });
+    }
+    if (courtFee > 0) {
+      lineItems.push({
+        price_data: {
+          currency: "eur",
+          product_data: {
+            name: `Court: ${cr.court_name ?? "Selected court"} — ${cr.arena_name}`,
+            description: `${cr.requested_date} · ${String(cr.requested_start_time).slice(0,5)}–${String(cr.requested_end_time).slice(0,5)}`,
+          },
+          unit_amount: Math.round(courtFee * TND_TO_EUR_RATE * 100),
+        },
+        quantity: 1,
+      });
+    }
+    if (!lineItems.length) {
+      lineItems.push({
+        price_data: {
+          currency: "eur",
+          product_data: { name: `Coach session: ${cr.coach_name}`, description: `${cr.requested_date}` },
+          unit_amount: Math.max(totalEurCents, 50),
+        },
+        quantity: 1,
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: lineItems,
+      mode: "payment",
+      success_url: `${baseUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}&type=coaching&id=${requestId}`,
+      cancel_url: `${baseUrl}/payment/cancel?type=coaching&id=${requestId}`,
+      metadata: { type: "coaching_request", requestId: String(requestId) },
+    });
+
+    await pgPool.query(
+      "UPDATE coaching_requests SET stripe_session_id = $1, payment_amount = $2 WHERE id = $3",
+      [session.id, totalTND, requestId]
+    );
+    return res.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create checkout session" });
+  }
+});
+
+// GET /api/payments/session/:sessionId — poll session status after redirect back
+app.get("/api/payments/session/:sessionId", requireAuth, async (req, res) => {
+  if (!STRIPE_SECRET_KEY) {
+    return res.status(503).json({ message: "Stripe is not configured." });
+  }
+  try {
+    const { default: Stripe } = await import("stripe");
+    const stripe = new Stripe(STRIPE_SECRET_KEY);
+    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+    return res.json({ status: session.payment_status, metadata: session.metadata });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to retrieve session" });
+  }
+});
+
+// POST /api/stripe/webhook — Stripe sends checkout.session.completed here
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!STRIPE_SECRET_KEY) return res.status(503).json({ message: "Stripe not configured" });
+
+  let event;
+  try {
+    const { default: Stripe } = await import("stripe");
+    const stripe = new Stripe(STRIPE_SECRET_KEY);
+    if (STRIPE_WEBHOOK_SECRET) {
+      const sig = req.headers["stripe-signature"];
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+    } else {
+      event = JSON.parse(req.body.toString());
+    }
+  } catch (err) {
+    console.error("Stripe webhook signature error:", err.message);
+    return res.status(400).json({ message: `Webhook error: ${err.message}` });
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const { default: pgPool } = await import("./pg-pool.mjs");
+
+    try {
+      if (session.metadata?.type === "reservation") {
+        const reservationId = Number(session.metadata.reservationId);
+        const { rows } = await pgPool.query("SELECT * FROM reservations WHERE id = $1", [reservationId]);
+        if (rows.length && rows[0].payment_status !== "paid") {
+          const r = rows[0];
+          await pgPool.query("UPDATE reservations SET payment_status='paid' WHERE id=$1", [reservationId]);
+          const existing = await pgPool.query("SELECT id FROM reservation_payments WHERE reservation_id = $1", [reservationId]);
+          if (!existing.rows.length) {
+            await pgPool.query(
+              "INSERT INTO reservation_payments (reservation_id, amount, currency, status, method, paid_at) VALUES ($1,$2,'EUR','paid','stripe',NOW())",
+              [reservationId, (session.amount_total / 100).toFixed(2)]
+            );
+          }
+          await createNotification({
+            userId: r.user_id,
+            title: "Payment confirmed",
+            body: `Your court reservation #${reservationId} is confirmed. Download your ticket below.`,
+            type: "payment",
+            linkUrl: `/payment/success?type=reservation&id=${reservationId}`,
+          });
+        }
+      } else if (session.metadata?.type === "coaching_request") {
+        const requestId = Number(session.metadata.requestId);
+        const { rows: crRows } = await pgPool.query("SELECT * FROM coaching_requests WHERE id = $1", [requestId]);
+        if (crRows.length && crRows[0].payment_status !== "paid") {
+          const cr = crRows[0];
+          await pgPool.query("UPDATE coaching_requests SET payment_status='paid' WHERE id=$1", [requestId]);
+
+          // Create the court reservation if a court was selected
+          let newReservationId = null;
+          if (cr.preferred_court_id) {
+            const { rows: courtRows } = await pgPool.query("SELECT * FROM courts WHERE id = $1", [cr.preferred_court_id]);
+            const court = courtRows[0];
+            if (court) {
+              const { rows: resRows } = await pgPool.query(
+                `INSERT INTO reservations
+                   (user_id, arena_id, court_id, reservation_date, start_time, end_time,
+                    sport, players_count, status, payment_status, booking_type, created_at)
+                 VALUES ($1,$2,$3,$4::date,$5::time,$6::time,'padel',$7,'confirmed','paid','coaching_session',NOW())
+                 RETURNING id`,
+                [
+                  cr.player_user_id, cr.arena_id, cr.preferred_court_id,
+                  cr.requested_date, cr.requested_start_time, cr.requested_end_time,
+                  cr.players_count ?? 2,
+                ]
+              );
+              newReservationId = resRows[0]?.id ?? null;
+            }
+          }
+
+          // Block that slot in coach availability as an exception
+          await pgPool.query(
+            `INSERT INTO coach_availability_exceptions
+               (coach_user_id, exception_date, start_time, end_time, reason)
+             VALUES ($1,$2::date,$3::time,$4::time,'booked')
+             ON CONFLICT DO NOTHING`,
+            [cr.coach_user_id, cr.requested_date, cr.requested_start_time, cr.requested_end_time]
+          );
+
+          // Notify coach
+          await createNotification({
+            userId: cr.coach_user_id,
+            title: "Session booked & paid",
+            body: `A player has paid for the session on ${cr.requested_date} at ${String(cr.requested_start_time).slice(0,5)}. The slot is now blocked.`,
+            type: "payment",
+            linkUrl: "/coach",
+          });
+          // Notify player
+          await createNotification({
+            userId: cr.player_user_id,
+            title: "Payment confirmed — session booked!",
+            body: `Your coaching session on ${cr.requested_date} at ${String(cr.requested_start_time).slice(0,5)} is confirmed.`,
+            type: "payment",
+            linkUrl: `/payment/success?type=coaching&id=${requestId}`,
+          });
+        }
+      }
+    } catch (processErr) {
+      console.error("Webhook processing error:", processErr);
+    }
+  }
+
+  return res.json({ received: true });
 });
 
 app.get("/api/reservations/tickets/verify", requireAuth, async (req, res) => {

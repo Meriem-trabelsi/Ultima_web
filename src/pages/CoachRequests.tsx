@@ -23,10 +23,10 @@ type CoachingRequest = {
 };
 
 const statusColor: Record<string, string> = {
-  pending: "bg-yellow-100 text-yellow-700",
-  accepted: "bg-green-100 text-green-700",
-  rejected: "bg-red-100 text-red-600",
-  counter_proposed: "bg-blue-100 text-blue-700",
+  pending: "border-amber-300/30 bg-amber-300/12 text-amber-200",
+  accepted: "border-emerald-300/30 bg-emerald-300/12 text-emerald-200",
+  rejected: "border-red-300/30 bg-red-300/12 text-red-200",
+  counter_proposed: "border-sky-300/30 bg-sky-300/12 text-sky-200",
 };
 
 const RequestCard = ({
@@ -59,26 +59,26 @@ const RequestCard = ({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-5 space-y-3">
+    <div className="rounded-xl border border-primary/20 bg-background/45 p-5 shadow-[0_18px_45px_hsl(var(--background)/0.32)] backdrop-blur-md space-y-4">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <p className="font-medium text-gray-900 dark:text-white">
-            {t("coachRequests.from")} <span className="text-green-600">{req.playerName}</span>
+          <p className="font-semibold text-foreground">
+            {t("coachRequests.from")} <span className="text-primary">{req.playerName}</span>
           </p>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <p className="text-sm text-muted-foreground mt-0.5">
             {req.requestedDate} · {req.requestedStartTime}–{req.requestedEndTime}
           </p>
-          <p className="text-sm text-gray-500 flex items-center gap-1 mt-0.5">
+          <p className="text-sm text-muted-foreground flex items-center gap-1 mt-0.5">
             <Users className="w-3.5 h-3.5" /> {req.playersCount} {t("coachRequests.players")}
           </p>
         </div>
-        <Badge className={`${statusColor[req.status] ?? "bg-gray-100 text-gray-600"} border-0 shrink-0`}>
+        <Badge className={`${statusColor[req.status] ?? "border-border bg-background/50 text-muted-foreground"} shrink-0`}>
           {t(`coachRequests.status.${req.status}`) || req.status}
         </Badge>
       </div>
 
       {req.message && (
-        <p className="text-sm text-gray-600 dark:text-gray-300 italic bg-gray-50 dark:bg-gray-800 rounded-xl px-3 py-2">
+        <p className="text-sm text-muted-foreground italic rounded-xl border border-border/40 bg-background/35 px-3 py-2">
           "{req.message}"
         </p>
       )}
@@ -97,7 +97,7 @@ const RequestCard = ({
               <Button
                 size="sm"
                 variant="outline"
-                className="rounded-xl border-blue-300 text-blue-600 hover:bg-blue-50"
+                className="rounded-xl border-sky-300/35 bg-background/35 text-sky-200 hover:bg-sky-300/10"
                 onClick={() => { setMode("counter"); setOpen(true); }}
               >
                 <RefreshCw className="w-4 h-4 mr-1" /> {t("coachRequests.counter")}
@@ -105,33 +105,33 @@ const RequestCard = ({
               <Button
                 size="sm"
                 variant="outline"
-                className="rounded-xl border-red-300 text-red-500 hover:bg-red-50"
+                className="rounded-xl border-red-300/35 bg-background/35 text-red-200 hover:bg-red-300/10"
                 onClick={() => { setMode("reject"); setOpen(true); }}
               >
                 <XCircle className="w-4 h-4 mr-1" /> {t("coachRequests.reject")}
               </Button>
             </div>
           ) : (
-            <div className="space-y-3 border-t pt-3">
+            <div className="space-y-3 border-t border-border/40 pt-3">
               {mode === "counter" && (
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <input
                     type="date"
                     value={counterDate}
                     onChange={(e) => setCounterDate(e.target.value)}
-                    className="border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800"
+                    className="border border-primary/25 rounded-xl px-3 py-2 text-sm bg-background/50 text-foreground"
                   />
                   <input
                     type="time"
                     value={counterStart}
                     onChange={(e) => setCounterStart(e.target.value)}
-                    className="border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800"
+                    className="border border-primary/25 rounded-xl px-3 py-2 text-sm bg-background/50 text-foreground"
                   />
                   <input
                     type="time"
                     value={counterEnd}
                     onChange={(e) => setCounterEnd(e.target.value)}
-                    className="border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800"
+                    className="border border-primary/25 rounded-xl px-3 py-2 text-sm bg-background/50 text-foreground"
                   />
                 </div>
               )}
@@ -140,7 +140,7 @@ const RequestCard = ({
                 value={replyMessage}
                 onChange={(e) => setReplyMessage(e.target.value)}
                 rows={2}
-                className="rounded-xl text-sm"
+                className="rounded-xl border-primary/25 bg-background/50 text-sm"
               />
               <div className="flex gap-2">
                 <Button
@@ -202,12 +202,12 @@ const CoachRequests = () => {
 
   return (
     <Layout>
-      <div className="max-w-3xl mx-auto px-4 py-10">
+      <div className="max-w-4xl mx-auto px-4 py-10">
         <div className="flex items-center gap-3 mb-8">
-          <div className="w-10 h-10 rounded-xl bg-green-100 flex items-center justify-center">
-            <Inbox className="w-5 h-5 text-green-600" />
+          <div className="w-10 h-10 rounded-xl border border-primary/25 bg-primary/10 flex items-center justify-center">
+            <Inbox className="w-5 h-5 text-primary" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">{t("coachRequests.title")}</h1>
+          <h1 className="text-2xl font-bold text-foreground">{t("coachRequests.title")}</h1>
         </div>
 
         {loading ? (
@@ -215,7 +215,7 @@ const CoachRequests = () => {
             {[1, 2, 3].map((i) => <Skeleton key={i} className="h-28 rounded-2xl" />)}
           </div>
         ) : requests.length === 0 ? (
-          <div className="text-center py-20 text-gray-400">
+          <div className="text-center py-20 text-muted-foreground">
             <Inbox className="w-12 h-12 mx-auto mb-4 opacity-30" />
             <p>{t("coachRequests.empty")}</p>
           </div>

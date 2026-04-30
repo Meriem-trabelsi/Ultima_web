@@ -29,6 +29,7 @@ type Profile = {
 
 const listToString = (arr: string[]) => (arr ?? []).join(", ");
 const stringToList = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+const panelClass = "rounded-xl border border-primary/20 bg-background/45 shadow-[0_18px_45px_hsl(var(--background)/0.32)] backdrop-blur-md";
 
 const CoachProfileEditor = () => {
   const { t } = useLocale();
@@ -139,7 +140,7 @@ const CoachProfileEditor = () => {
   if (loading) {
     return (
       <Layout>
-        <div className="max-w-2xl mx-auto px-4 py-10 space-y-4">
+        <div className="max-w-3xl mx-auto px-4 py-10 space-y-4">
           <Skeleton className="h-24 rounded-2xl" />
           <Skeleton className="h-64 rounded-2xl" />
         </div>
@@ -149,19 +150,19 @@ const CoachProfileEditor = () => {
 
   const field = (key: keyof typeof form, label: string, multiline?: boolean) => (
     <div>
-      <label className="text-xs font-medium text-gray-500 mb-1 block">{label}</label>
+      <label className="text-xs font-medium text-muted-foreground mb-1 block">{label}</label>
       {multiline ? (
         <Textarea
           rows={4}
           value={form[key]}
           onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-          className="rounded-xl text-sm"
+          className="rounded-xl border-primary/25 bg-background/50 text-sm"
         />
       ) : (
         <Input
           value={form[key]}
           onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-          className="rounded-xl text-sm"
+          className="rounded-xl border-primary/25 bg-background/50 text-sm"
         />
       )}
     </div>
@@ -169,35 +170,35 @@ const CoachProfileEditor = () => {
 
   return (
     <Layout>
-      <div className="max-w-2xl mx-auto px-4 py-10">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-8">{t("coachEditor.title")}</h1>
+      <div className="max-w-3xl mx-auto px-4 py-10">
+        <h1 className="text-2xl font-bold text-foreground mb-8">{t("coachEditor.title")}</h1>
 
         {/* Avatar */}
-        <div className="flex items-center gap-5 mb-8">
+        <div className={`${panelClass} flex items-center gap-5 mb-8 p-5`}>
           <div className="relative">
-            <div className="w-20 h-20 rounded-full overflow-hidden bg-gray-100 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700">
+            <div className="w-24 h-24 rounded-xl overflow-hidden bg-background/50 border border-primary/25">
               {avatarUrl ? (
                 <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-2xl text-gray-400">?</div>
+                <div className="w-full h-full flex items-center justify-center text-2xl text-muted-foreground">?</div>
               )}
             </div>
             <button
               onClick={() => fileRef.current?.click()}
-              className="absolute -bottom-1 -right-1 w-7 h-7 bg-green-600 rounded-full flex items-center justify-center shadow-md hover:bg-green-700"
+              className="absolute -bottom-2 -right-2 w-9 h-9 rounded-full border border-primary/35 bg-primary text-primary-foreground flex items-center justify-center shadow-md hover:bg-primary/90"
               disabled={avatarUploading}
             >
-              <Camera className="w-3.5 h-3.5 text-white" />
+              <Camera className="w-4 h-4" />
             </button>
             <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarChange} />
           </div>
           <div>
-            <p className="font-medium text-gray-900 dark:text-white text-sm">{t("coachEditor.uploadAvatar")}</p>
-            <p className="text-xs text-gray-400 mt-0.5">JPG, PNG up to 5 MB</p>
+            <p className="font-semibold text-foreground text-sm">{t("coachEditor.uploadAvatar")}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">JPG, PNG up to 5 MB</p>
           </div>
         </div>
 
-        <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-6 space-y-5">
+        <div className={`${panelClass} p-6 space-y-5`}>
           {field("headline", t("coachEditor.headline"))}
           {field("bio", t("coachEditor.bio"), true)}
           {field("expertise", t("coachEditor.expertise"))}
@@ -213,7 +214,7 @@ const CoachProfileEditor = () => {
           <Button
             onClick={handleSave}
             disabled={saving}
-            className="w-full bg-green-600 hover:bg-green-700 text-white rounded-xl h-11"
+            className="w-full glow-yellow rounded-xl h-11"
           >
             <Save className="w-4 h-4 mr-2" />
             {saving ? "…" : t("coachEditor.save")}

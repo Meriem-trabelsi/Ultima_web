@@ -81,6 +81,9 @@ const StepDots = ({ current, total }: { current: number; total: number }) => (
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const panelClass = "rounded-xl border border-primary/20 bg-background/45 shadow-[0_18px_45px_hsl(var(--background)/0.32)] backdrop-blur-md";
+const interactivePanelClass = `${panelClass} transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/55 hover:bg-background/65 hover:shadow-[0_22px_50px_hsl(var(--primary)/0.14)] focus:outline-none focus-visible:ring-2 focus-visible:ring-primary`;
+
 const todayStr = () => new Date().toISOString().split("T")[0];
 
 const initials = (first: string, last: string) =>
@@ -236,7 +239,7 @@ const CoachBooking = () => {
       // ── Step 0: Arena ───────────────────────────────────────────────────────
       case 0:
         return (
-          <div className="space-y-5">
+          <div className="animate-fade-in space-y-6">
             {/* Search + city filters */}
             <div className="flex flex-wrap gap-3 items-center">
               <div className="relative flex-1 min-w-[220px]">
@@ -280,7 +283,7 @@ const CoachBooking = () => {
                         <Skeleton className="h-5 w-16 rounded-full" />
                         <Skeleton className="h-5 w-16 rounded-full" />
                       </div>
-                      <Skeleton className="h-9 w-full rounded-xl mt-2" />
+                      <Skeleton className="h-11 w-full rounded-xl mt-2" />
                     </div>
                   </div>
                 ))
@@ -352,9 +355,9 @@ const CoachBooking = () => {
             <h2 className="text-lg font-bold text-foreground mb-1">{t("coachBooking.step.coach")}</h2>
             <p className="text-sm text-muted-foreground mb-5">{selectedArena?.name}</p>
             {coachesLoading ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
                 {[1, 2, 3].map((i) => (
-                  <div key={i} className="rounded-2xl border border-border/40 bg-card p-5 animate-pulse space-y-3">
+                  <div key={i} className={`${panelClass} p-5 animate-pulse space-y-3`}>
                     <div className="h-4 bg-muted rounded w-2/3" />
                     <div className="h-3 bg-muted rounded w-1/2" />
                     <div className="h-3 bg-muted rounded w-1/3" />
@@ -367,12 +370,12 @@ const CoachBooking = () => {
                 <p className="text-sm">{t("coachBooking.coach.noCoaches")}</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
                 {coaches.map((coach) => (
                   <button
                     key={coach.userId}
                     onClick={() => { setSelectedCoach(coach); setStep(2); }}
-                    className="text-left rounded-2xl border border-border/40 bg-card p-5 hover:border-primary/50 hover:shadow-md hover:-translate-y-0.5 transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    className={`text-left p-5 ${interactivePanelClass}`}
                   >
                     <div className="flex items-start gap-3 mb-3">
                       <div className="w-12 h-12 rounded-xl bg-muted border border-border/40 overflow-hidden shrink-0 flex items-center justify-center text-sm font-bold text-muted-foreground">
@@ -436,7 +439,7 @@ const CoachBooking = () => {
               value={date}
               min={todayStr()}
               onChange={(e) => setDate(e.target.value)}
-              className="w-full max-w-xs rounded-xl border border-border/60 bg-background text-foreground px-3 py-2 text-sm mb-5 focus:outline-none focus:ring-2 focus:ring-primary/30"
+              className="w-full max-w-xs rounded-xl border border-primary/25 bg-background/50 text-foreground px-3 py-2 text-sm mb-5 backdrop-blur-md focus:outline-none focus:ring-2 focus:ring-primary/30"
             />
 
             {slotsLoading ? (
@@ -487,9 +490,9 @@ const CoachBooking = () => {
               {date} · {selectedSlot?.start}–{selectedSlot?.end}
             </p>
             {courtsLoading ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {[1, 2, 3].map((i) => (
-                  <div key={i} className="rounded-2xl border border-border/40 bg-card p-5 animate-pulse space-y-3">
+                  <div key={i} className={`${panelClass} min-h-36 p-6 animate-pulse space-y-3`}>
                     <div className="h-4 bg-muted rounded w-2/3" />
                     <div className="h-3 bg-muted rounded w-1/2" />
                     <div className="h-3 bg-muted rounded w-1/3" />
@@ -502,24 +505,24 @@ const CoachBooking = () => {
                 <p className="text-sm">{t("coachBooking.court.noAvailable")}</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {courts.map((court) => (
                   <button
                     key={court.id}
                     onClick={() => { setSelectedCourt(court); setStep(4); }}
-                    className="text-left rounded-2xl border border-border/40 bg-card p-5 hover:border-primary/50 hover:shadow-md hover:-translate-y-0.5 transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    className={`text-left min-h-36 p-6 ${interactivePanelClass}`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="font-semibold text-foreground text-sm">{court.name}</p>
-                      <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <div className="flex items-start justify-between gap-4 mb-4">
+                      <p className="font-bold text-foreground text-lg leading-tight">{court.name}</p>
+                      <CheckCircle className="w-5 h-5 text-primary shrink-0" />
                     </div>
                     <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span>{court.sport}</span>
+                      <span className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1">{court.sport}</span>
                       {court.courtType && <span>· {court.courtType}</span>}
                       {court.surfaceType && <span>· {court.surfaceType}</span>}
                     </div>
                     {court.pricePerHour != null && (
-                      <p className="text-xs font-semibold text-foreground mt-2">
+                      <p className="text-sm font-semibold text-foreground mt-5">
                         {court.pricePerHour} {court.currency}{t("coaches.card.rate")}
                       </p>
                     )}
@@ -542,7 +545,7 @@ const CoachBooking = () => {
             <h2 className="text-lg font-bold text-foreground mb-5">{t("coachBooking.step.confirm")}</h2>
 
             {/* Summary card */}
-            <div className="rounded-2xl border border-border/40 bg-card p-5 space-y-3 mb-6">
+            <div className={`${panelClass} p-5 space-y-3 mb-6`}>
               <SummaryRow label={t("coachBooking.summary.arena")} value={selectedArena?.name ?? ""} />
               <SummaryRow label={t("coachBooking.summary.coach")} value={`${selectedCoach?.firstName} ${selectedCoach?.lastName}`} />
               <SummaryRow label={t("coachBooking.summary.date")} value={`${date} · ${selectedSlot?.start}–${selectedSlot?.end}`} />
@@ -571,14 +574,14 @@ const CoachBooking = () => {
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setPlayersCount(Math.max(1, playersCount - 1))}
-                  className="w-8 h-8 rounded-full border border-border/60 flex items-center justify-center hover:bg-muted text-foreground font-semibold"
+                  className="w-8 h-8 rounded-full border border-primary/25 bg-background/40 flex items-center justify-center hover:bg-primary/10 text-foreground font-semibold"
                 >
                   −
                 </button>
                 <span className="font-semibold text-foreground w-4 text-center">{playersCount}</span>
                 <button
                   onClick={() => setPlayersCount(Math.min(2, playersCount + 1))}
-                  className="w-8 h-8 rounded-full border border-border/60 flex items-center justify-center hover:bg-muted text-foreground font-semibold"
+                  className="w-8 h-8 rounded-full border border-primary/25 bg-background/40 flex items-center justify-center hover:bg-primary/10 text-foreground font-semibold"
                 >
                   +
                 </button>
@@ -595,7 +598,7 @@ const CoachBooking = () => {
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 rows={3}
-                className="rounded-xl text-sm resize-none"
+                className="rounded-xl border-primary/25 bg-background/50 text-sm resize-none backdrop-blur-md"
                 placeholder={t("coachProfile.requestForm.messagePlaceholder")}
               />
             </div>
@@ -624,7 +627,7 @@ const CoachBooking = () => {
 
   return (
     <Layout>
-      <div className="max-w-2xl mx-auto px-4 py-10">
+      <div className="container py-12">
         {/* Header */}
         <div className="mb-6">
           <button
@@ -641,7 +644,9 @@ const CoachBooking = () => {
         <StepDots current={step} total={5} />
 
         {/* Step content */}
-        <div>{renderStep()}</div>
+        <div className={step === 0 ? "" : "rounded-[1.5rem] border border-primary/15 bg-background/20 p-4 shadow-[0_28px_70px_hsl(var(--background)/0.35)] backdrop-blur-sm sm:p-6"}>
+          {renderStep()}
+        </div>
       </div>
     </Layout>
   );

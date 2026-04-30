@@ -44,6 +44,7 @@ function normalizeCoachProfile(row) {
     arenaId: row.arena_id,
     arenaName: row.arena_name ?? null,
     arenaCity: row.arena_city ?? null,
+    arenaRegion: row.arena_region ?? null,
     firstName: row.first_name ?? null,
     lastName: row.last_name ?? null,
     email: row.email ?? null,
@@ -213,7 +214,7 @@ export async function listCoachProfiles(filters = {}) {
   if (search) {
     params.push(`%${search}%`);
     const idx = params.length;
-    where.push(`(u.first_name ILIKE $${idx} OR u.last_name ILIKE $${idx} OR cp.headline ILIKE $${idx})`);
+    where.push(`(u.first_name ILIKE $${idx} OR u.last_name ILIKE $${idx} OR cp.headline ILIKE $${idx} OR a.name ILIKE $${idx} OR a.city ILIKE $${idx} OR a.region ILIKE $${idx})`);
   }
 
   const { rows } = await pool.query(
@@ -243,7 +244,7 @@ export async function listCoachProfiles(filters = {}) {
 export async function getCoachPublicProfile(coachUserId) {
   const { rows } = await pool.query(
     `SELECT cp.*, u.first_name, u.last_name, u.email, u.status AS user_status,
-            a.name AS arena_name, a.city AS arena_city
+            a.name AS arena_name, a.city AS arena_city, a.region AS arena_region
      FROM users u
      LEFT JOIN coach_profiles cp ON cp.user_id = u.id
      LEFT JOIN arenas a ON a.id = cp.arena_id

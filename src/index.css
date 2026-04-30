@@ -614,3 +614,26 @@ footer {
   from { opacity: 0; transform: translateY(20px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+.coach-week-scroll {
+  scrollbar-color: hsl(var(--foreground) / 0.45) hsl(var(--background) / 0.35);
+  scrollbar-width: thin;
+}
+
+.coach-week-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.coach-week-scroll::-webkit-scrollbar-track {
+  background: hsl(var(--background) / 0.35);
+  border-radius: 999px;
+}
+
+.coach-week-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--foreground) / 0.45);
+  border-radius: 999px;
+}
+
+.coach-week-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--foreground) / 0.65);
+}

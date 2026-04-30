@@ -30,6 +30,8 @@ import ResetPassword from "./pages/ResetPassword";
 import VerifyEmail from "./pages/VerifyEmail";
 import ReservationChoice from "./pages/ReservationChoice";
 import CoachBooking from "./pages/CoachBooking";
+import PaymentSuccess from "./pages/PaymentSuccess";
+import PaymentCancel from "./pages/PaymentCancel";
 
 const queryClient = new QueryClient();
 
@@ -124,6 +126,10 @@ const App = () => (
                 element={<AuthGuard requireAdmin><Admin /></AuthGuard>} 
               />
               
+              {/* Stripe payment return pages — no auth guard needed (Stripe redirects here) */}
+              <Route path="/payment/success" element={<PaymentSuccess />} />
+              <Route path="/payment/cancel" element={<PaymentCancel />} />
+
               <Route path="*" element={<NotFound />} />
             </Routes>
           </BrowserRouter>

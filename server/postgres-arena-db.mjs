@@ -20,6 +20,8 @@ const BILLING_SECRET = process.env.BILLING_SIGNATURE_SECRET ?? process.env.JWT_S
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const LOGO_CANDIDATE_PATHS = [path.resolve(__dirname, "../src/assets/ultima_logo.jpg"), path.resolve(__dirname, "../public/ultima_logo.jpg")];
+const DB_STARTUP_RETRY_ATTEMPTS = Number(process.env.DB_STARTUP_RETRY_ATTEMPTS ?? 30);
+const DB_STARTUP_RETRY_DELAY_MS = Number(process.env.DB_STARTUP_RETRY_DELAY_MS ?? 1000);
 const mkCourt = (name, opts = {}) => ({
   name,
   sport: "Padel",
@@ -745,8 +747,37 @@ async function hasReservationConflict(courtId, reservationDate, startTime, endTi
   return rows.length > 0;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isDatabaseStarting(error) {
+  return error?.code === "57P03" || error?.code === "ECONNREFUSED" || error?.code === "ETIMEDOUT" || error?.code === "ENOTFOUND";
+}
+
+async function waitForDatabaseReady() {
+  const attempts = Math.max(1, DB_STARTUP_RETRY_ATTEMPTS);
+  const delayMs = Math.max(0, DB_STARTUP_RETRY_DELAY_MS);
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await pool.query("SELECT 1");
+      if (attempt > 1) {
+        console.log(`PostgreSQL accepted connections after ${attempt} attempts.`);
+      }
+      return;
+    } catch (error) {
+      if (!isDatabaseStarting(error) || attempt === attempts) {
+        throw error;
+      }
+      console.warn(`PostgreSQL is not ready yet (${error.code ?? error.message}). Retrying in ${delayMs}ms (${attempt}/${attempts})...`);
+      await sleep(delayMs);
+    }
+  }
+}
+
 export async function initializeDatabase() {
-  await pool.query("SELECT 1");
+  await waitForDatabaseReady();
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS count
      FROM information_schema.tables
@@ -939,6 +970,12 @@ export async function initializeDatabase() {
 
   // Coach booking wizard support
   await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS preferred_court_id INT NULL REFERENCES courts(id)");
+
+  // Stripe payment support
+  await pool.query("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS stripe_session_id VARCHAR(255) NULL");
+  await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS stripe_session_id VARCHAR(255) NULL");
+  await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(10,2) NULL");
+  await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) NOT NULL DEFAULT 'pending'");
 
   await seedShowcaseArenas();
 }
@@ -3618,6 +3655,7 @@ function normalizeCoachProfile(row) {
     arenaId: row.arena_id,
     arenaName: row.arena_name ?? null,
     arenaCity: row.arena_city ?? null,
+    arenaRegion: row.arena_region ?? null,
     firstName: row.first_name ?? null,
     lastName: row.last_name ?? null,
     email: row.email ?? null,
@@ -3783,7 +3821,7 @@ export async function listCoachProfiles(filters = {}) {
   if (search) {
     params.push(`%${search}%`);
     const idx = params.length;
-    where.push(`(u.first_name ILIKE $${idx} OR u.last_name ILIKE $${idx} OR cp.headline ILIKE $${idx})`);
+    where.push(`(u.first_name ILIKE $${idx} OR u.last_name ILIKE $${idx} OR cp.headline ILIKE $${idx} OR a.name ILIKE $${idx} OR a.city ILIKE $${idx} OR a.region ILIKE $${idx})`);
   }
   const { rows } = await pool.query(
     `SELECT cp.*, u.first_name, u.last_name, u.email, u.status AS user_status,
@@ -3811,7 +3849,7 @@ export async function listCoachProfiles(filters = {}) {
 export async function getCoachPublicProfile(coachUserId) {
   const { rows } = await pool.query(
     `SELECT cp.*, u.first_name, u.last_name, u.email, u.status AS user_status,
-            a.name AS arena_name, a.city AS arena_city
+            a.name AS arena_name, a.city AS arena_city, a.region AS arena_region
      FROM users u
      LEFT JOIN coach_profiles cp ON cp.user_id = u.id
      LEFT JOIN arenas a ON a.id = cp.arena_id

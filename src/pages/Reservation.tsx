@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Calendar, MapPin, QrCode, CheckCircle, ArrowRight, Users, Search,
-  Building2, Sun, Zap, ChevronLeft, CreditCard, Clock, Banknote,
+  Building2, Sun, ChevronLeft, CreditCard, Clock,
   Loader2, CheckCircle2, XCircle, AlertTriangle, Layers, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -238,13 +238,6 @@ const Reservation = () => {
     t("res.step.review"), t("res.step.confirmed"),
   ], [locale]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const paymentMethods = useMemo(() => [
-    { value: "cash",      label: t("res.pay.cash"),      icon: <Banknote size={14} /> },
-    { value: "card",      label: t("res.pay.card"),      icon: <CreditCard size={14} /> },
-    { value: "online",    label: t("res.pay.online"),    icon: <Zap size={14} /> },
-    { value: "simulated", label: t("res.pay.simulated"), icon: <Clock size={14} /> },
-  ], [locale]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const [step, setStep] = useState(0);
 
   // Arena
@@ -275,8 +268,7 @@ const Reservation = () => {
   useConfetti(showConfetti);
 
   // Billing
-  const [paymentMethod, setPaymentMethod] = useState("simulated");
-  const [paymentStatus, setPaymentStatus] = useState<"idle" | "paying" | "paid">("idle");
+  const [paymentStatus, setPaymentStatus] = useState<"idle" | "paying">("idle");
 
   useEffect(() => {
     api<{ places: Arena[] }>("/api/padel/places")
@@ -380,15 +372,13 @@ const Reservation = () => {
     if (!confirmedReservation) return;
     setPaymentStatus("paying");
     try {
-      await api(`/api/reservations/${confirmedReservation.id}/pay`, {
+      const data = await api<{ url: string }>(`/api/payments/reservation/${confirmedReservation.id}/checkout`, {
         method: "POST", authenticated: true,
-        body: JSON.stringify({ amount: totalPrice, currency: "TND", method: paymentMethod }),
       });
-      setPaymentStatus("paid");
-      toast.success("Payment recorded!");
-    } catch {
+      window.location.href = data.url;
+    } catch (err) {
       setPaymentStatus("idle");
-      toast.error("Payment error.");
+      toast.error(err instanceof Error ? err.message : "Unable to start payment.");
     }
   };
 
@@ -736,31 +726,20 @@ const Reservation = () => {
                 </div>
               </div>
 
-              {paymentStatus === "paid" ? (
-                <div className="rounded-lg bg-green-500/10 border border-green-500/25 px-4 py-3 text-center">
-                  <CheckCircle className="mx-auto text-green-400 mb-1" size={22} />
-                  <p className="text-sm font-medium text-green-400">{t("res.billing.paid")}</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">{paymentMethods.find((m) => m.value === paymentMethod)?.label}</p>
-                </div>
-              ) : (
-                <>
-                  <div>
-                    <label className="text-sm font-medium block mb-2">{t("res.billing.paymentMethod")}</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      {paymentMethods.map((m) => (
-                        <button key={m.value} onClick={() => setPaymentMethod(m.value)}
-                          className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${paymentMethod === m.value ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:border-primary/30"}`}>
-                          {m.icon} {m.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <Button className="w-full glow-yellow" onClick={handlePay} disabled={paymentStatus === "paying"}>
-                    {paymentStatus === "paying" ? t("res.billing.processing") : `${totalPrice.toFixed(3)} TND`}
-                  </Button>
-                  <p className="text-[11px] text-muted-foreground text-center">{t("res.billing.payOnSite")}</p>
-                </>
-              )}
+              <Button
+                className="w-full glow-yellow h-12 text-base font-semibold"
+                onClick={handlePay}
+                disabled={paymentStatus === "paying"}
+              >
+                {paymentStatus === "paying" ? (
+                  <><Loader2 className="animate-spin mr-2" size={16} /> Redirecting…</>
+                ) : (
+                  <><CreditCard className="mr-2" size={16} /> Pay {totalPrice.toFixed(3)} TND via Stripe</>
+                )}
+              </Button>
+              <p className="text-[11px] text-muted-foreground text-center">
+                You will be redirected to Stripe's secure payment page. Amount charged in EUR (≈ {(totalPrice * 0.30).toFixed(2)} EUR).
+              </p>
             </div>
           </div>
         )}
