@@ -1165,10 +1165,41 @@ app.get("/api/payments/session/:sessionId", requireAuth, async (req, res) => {
         }
       } else if (meta.type === "coaching_request") {
         const requestId = Number(meta.requestId);
-        const { rows: crRows } = await pgPool.query("SELECT payment_status FROM coaching_requests WHERE id=$1", [requestId]);
+        const { rows: crRows } = await pgPool.query("SELECT * FROM coaching_requests WHERE id=$1", [requestId]);
         if (crRows.length && crRows[0].payment_status !== "paid") {
-          // Delegate to webhook handler logic by re-emitting — just mark paid here as minimum
+          const cr = crRows[0];
           await pgPool.query("UPDATE coaching_requests SET payment_status='paid' WHERE id=$1", [requestId]);
+
+          // Create reservation if not yet created
+          if (cr.preferred_court_id && !cr.coaching_reservation_id) {
+            const qrToken = randomUUID();
+            const { rows: resRows } = await pgPool.query(
+              `INSERT INTO reservations
+                 (user_id, arena_id, court_id, reservation_date, start_time, end_time,
+                  sport, players_count, status, payment_status, booking_type, qr_token, created_at)
+               VALUES ($1,$2,$3,$4::date,$5::time,$6::time,'padel',$7,'confirmed','paid','coaching_session',$8,NOW())
+               RETURNING id`,
+              [cr.player_user_id, cr.arena_id, cr.preferred_court_id,
+               cr.requested_date, cr.requested_start_time, cr.requested_end_time,
+               cr.players_count ?? 2, qrToken]
+            );
+            const newResId = resRows[0]?.id ?? null;
+            if (newResId) {
+              await pgPool.query("UPDATE coaching_requests SET coaching_reservation_id=$1 WHERE id=$2", [newResId, requestId]);
+            }
+          }
+
+          // Block coach slot
+          await pgPool.query(
+            `INSERT INTO coach_availability_exceptions (coach_user_id, exception_date, start_time, end_time, reason)
+             VALUES ($1,$2::date,$3::time,$4::time,'booked') ON CONFLICT DO NOTHING`,
+            [cr.coach_user_id, cr.requested_date, cr.requested_start_time, cr.requested_end_time]
+          );
+
+          try {
+            await createNotification({ userId: cr.coach_user_id, title: "Session booked & paid", body: `Session on ${cr.requested_date} at ${String(cr.requested_start_time).slice(0,5)} is confirmed.`, type: "payment", linkUrl: "/coach" });
+            await createNotification({ userId: cr.player_user_id, title: "Payment confirmed — session booked!", body: `Your coaching session on ${cr.requested_date} is confirmed.`, type: "payment", linkUrl: "/coaching-requests" });
+          } catch (_) {}
         }
       }
     }
@@ -1237,20 +1268,24 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
             const { rows: courtRows } = await pgPool.query("SELECT * FROM courts WHERE id = $1", [cr.preferred_court_id]);
             const court = courtRows[0];
             if (court) {
+              const qrToken = randomUUID();
               const { rows: resRows } = await pgPool.query(
                 `INSERT INTO reservations
                    (user_id, arena_id, court_id, reservation_date, start_time, end_time,
-                    sport, players_count, status, payment_status, booking_type, created_at)
-                 VALUES ($1,$2,$3,$4::date,$5::time,$6::time,'padel',$7,'confirmed','paid','coaching_session',NOW())
+                    sport, players_count, status, payment_status, booking_type, qr_token, created_at)
+                 VALUES ($1,$2,$3,$4::date,$5::time,$6::time,'padel',$7,'confirmed','paid','coaching_session',$8,NOW())
                  RETURNING id`,
                 [
                   cr.player_user_id, cr.arena_id, cr.preferred_court_id,
                   cr.requested_date, cr.requested_start_time, cr.requested_end_time,
-                  cr.players_count ?? 2,
+                  cr.players_count ?? 2, qrToken,
                 ]
               );
               newReservationId = resRows[0]?.id ?? null;
             }
+          }
+          if (newReservationId) {
+            await pgPool.query("UPDATE coaching_requests SET coaching_reservation_id=$1 WHERE id=$2", [newReservationId, requestId]);
           }
 
           // Block that slot in coach availability as an exception

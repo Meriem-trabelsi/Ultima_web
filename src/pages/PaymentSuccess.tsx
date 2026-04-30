@@ -161,10 +161,11 @@ const PaymentSuccess = () => {
           )}
 
           {type === "coaching" && id && (
-            <div className="text-sm text-muted-foreground text-center">
-              <p className="mb-3">Your coach has been notified and the slot is blocked in their calendar.</p>
-              <Button className="w-full" variant="outline" onClick={() => navigate("/coaching-requests")}>
-                View my coaching requests
+            <div className="text-sm text-muted-foreground space-y-4">
+              <p>Your coach has been notified and the slot is blocked in their calendar.</p>
+              <p className="text-xs">Your ticket is available in <strong className="text-foreground">My Coaching Requests</strong> — download the PDF or scan the QR code to get it on your phone.</p>
+              <Button className="w-full glow-yellow" onClick={() => navigate("/coaching-requests")}>
+                View ticket &amp; download
               </Button>
             </div>
           )}

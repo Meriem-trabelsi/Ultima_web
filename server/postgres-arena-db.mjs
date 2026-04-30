@@ -976,6 +976,7 @@ export async function initializeDatabase() {
   await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS stripe_session_id VARCHAR(255) NULL");
   await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(10,2) NULL");
   await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) NOT NULL DEFAULT 'pending'");
+  await pool.query("ALTER TABLE coaching_requests ADD COLUMN IF NOT EXISTS coaching_reservation_id INT NULL REFERENCES reservations(id)");
 
   await seedShowcaseArenas();
 }
@@ -3698,6 +3699,8 @@ function normalizeCoachingRequest(row) {
     counterProposedDate: row.counter_proposed_date ? String(row.counter_proposed_date).slice(0, 10) : null,
     counterProposedStartTime: row.counter_proposed_start_time ? String(row.counter_proposed_start_time).slice(0, 5) : null,
     counterProposedEndTime: row.counter_proposed_end_time ? String(row.counter_proposed_end_time).slice(0, 5) : null,
+    paymentStatus: row.payment_status ?? "pending",
+    reservationId: row.coaching_reservation_id ?? null,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
   };

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Layout from "@/components/Layout";
 import { api } from "@/lib/api";
@@ -6,8 +6,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useLocale } from "@/i18n/locale";
-import { MessageSquare, Calendar, Clock, Users, CreditCard, Loader2 } from "lucide-react";
+import { MessageSquare, Calendar, Clock, Users, CreditCard, Loader2, Download, Smartphone, CheckCircle } from "lucide-react";
 import { toast } from "sonner";
+import { getToken } from "@/lib/session";
+import QRCode from "qrcode";
 
 type RequestRow = {
   id: number;
@@ -18,6 +20,8 @@ type RequestRow = {
   requestedEndTime: string;
   playersCount: number;
   status: string;
+  paymentStatus: string;
+  reservationId: number | null;
   coachReplyMessage: string | null;
   counterProposedDate: string | null;
   counterProposedStartTime: string | null;
@@ -30,6 +34,72 @@ const statusConfig: Record<string, { label: string; cls: string }> = {
   accepted:         { label: "coachRequests.status.accepted",         cls: "border-emerald-300/30 bg-emerald-300/12 text-emerald-200" },
   rejected:         { label: "coachRequests.status.rejected",         cls: "border-red-300/30 bg-red-300/12 text-red-200" },
   counter_proposed: { label: "coachRequests.status.counter_proposed", cls: "border-sky-300/30 bg-sky-300/12 text-sky-200" },
+};
+
+// Per-request ticket QR component
+const TicketQR = ({ reservationId }: { reservationId: number }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [mobileUrl, setMobileUrl] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  useEffect(() => {
+    api<{ url: string }>(`/api/reservations/${reservationId}/ticket-link`, { authenticated: true })
+      .then((data) => setMobileUrl(data.url))
+      .catch(() => {});
+  }, [reservationId]);
+
+  useEffect(() => {
+    if (!mobileUrl || !canvasRef.current) return;
+    QRCode.toCanvas(canvasRef.current, mobileUrl, {
+      width: 160,
+      margin: 2,
+      color: { dark: "#f5c842", light: "#0a0a0f" },
+    }).catch(() => {});
+  }, [mobileUrl]);
+
+  const download = async () => {
+    setDownloading(true);
+    try {
+      const token = getToken();
+      const res = await fetch(`/api/reservations/${reservationId}/ticket.pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) { const p = await res.json().catch(() => ({})); throw new Error(p.message ?? "Failed"); }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `coaching-session-${reservationId}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 pt-4 border-t border-border/40 space-y-3">
+      <div className="flex items-center gap-2 text-sm text-emerald-400 font-medium">
+        <CheckCircle size={15} /> Session confirmed &amp; paid
+      </div>
+      <Button className="glow-yellow gap-2 h-9 text-sm w-full sm:w-auto" onClick={download} disabled={downloading}>
+        {downloading ? <><Loader2 className="animate-spin" size={14} /> Generating…</> : <><Download size={14} /> Download ticket PDF</>}
+      </Button>
+      {mobileUrl && (
+        <div className="flex items-start gap-4 mt-2">
+          <div className="rounded-xl overflow-hidden border border-primary/30 p-1.5 bg-[#0a0a0f] shrink-0"
+            style={{ boxShadow: "0 0 16px hsl(var(--primary) / 0.15)" }}>
+            <canvas ref={canvasRef} />
+          </div>
+          <div className="flex flex-col gap-1 justify-center">
+            <span className="flex items-center gap-1.5 text-xs font-medium text-foreground"><Smartphone size={13} /> Scan to download on phone</span>
+            <span className="text-[11px] text-muted-foreground">Points your camera — PDF downloads directly.</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
 const CoachingRequests = () => {
@@ -77,10 +147,7 @@ const CoachingRequests = () => {
           <div className="text-center py-20 text-muted-foreground">
             <MessageSquare className="w-12 h-12 mx-auto mb-4 opacity-30" />
             <p className="mb-6">{t("coachingRequests.empty")}</p>
-            <Button
-              onClick={() => navigate("/coaches")}
-              className="rounded-xl glow-yellow"
-            >
+            <Button onClick={() => navigate("/coaches")} className="rounded-xl glow-yellow">
               {t("coachingRequests.findCoach")}
             </Button>
           </div>
@@ -88,6 +155,7 @@ const CoachingRequests = () => {
           <div className="space-y-4">
             {requests.map((req) => {
               const sc = statusConfig[req.status] ?? { label: req.status, cls: "border-border bg-background/50 text-muted-foreground" };
+              const isPaid = req.paymentStatus === "paid";
               return (
                 <div
                   key={req.id}
@@ -99,19 +167,15 @@ const CoachingRequests = () => {
                         {t("coachingRequests.to")}: <span className="text-primary">{req.coachName}</span>
                       </p>
                       <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground flex-wrap">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="w-3.5 h-3.5" /> {req.requestedDate}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5" />
-                          {req.requestedStartTime}–{req.requestedEndTime}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Users className="w-3.5 h-3.5" /> {req.playersCount}
-                        </span>
+                        <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" /> {req.requestedDate}</span>
+                        <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" />{req.requestedStartTime}–{req.requestedEndTime}</span>
+                        <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" /> {req.playersCount}</span>
                       </div>
                     </div>
-                    <Badge className={`${sc.cls} shrink-0`}>{t(sc.label)}</Badge>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Badge className={`${sc.cls} shrink-0`}>{t(sc.label)}</Badge>
+                      {isPaid && <Badge className="border-emerald-400/30 bg-emerald-400/10 text-emerald-300 shrink-0">Paid</Badge>}
+                    </div>
                   </div>
 
                   {req.coachReplyMessage && (
@@ -126,7 +190,7 @@ const CoachingRequests = () => {
                     </div>
                   )}
 
-                  {req.status === "accepted" && (
+                  {req.status === "accepted" && !isPaid && (
                     <div className="mt-4 pt-4 border-t border-border/40">
                       <Button
                         className="glow-yellow gap-2 h-9 text-sm"
@@ -141,6 +205,10 @@ const CoachingRequests = () => {
                         You will be charged for the coach fee + court fee via Stripe.
                       </p>
                     </div>
+                  )}
+
+                  {isPaid && req.reservationId && (
+                    <TicketQR reservationId={req.reservationId} />
                   )}
                 </div>
               );
