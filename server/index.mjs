@@ -1106,6 +1106,7 @@ app.post("/api/payments/coaching-request/:id/checkout", requireAuth, async (req,
 });
 
 // GET /api/payments/session/:sessionId — poll session status after redirect back
+// Also acts as fallback fulfillment in case the webhook was delayed or missed.
 app.get("/api/payments/session/:sessionId", requireAuth, async (req, res) => {
   if (!STRIPE_SECRET_KEY) {
     return res.status(503).json({ message: "Stripe is not configured." });
@@ -1114,6 +1115,34 @@ app.get("/api/payments/session/:sessionId", requireAuth, async (req, res) => {
     const { default: Stripe } = await import("stripe");
     const stripe = new Stripe(STRIPE_SECRET_KEY);
     const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+
+    if (session.payment_status === "paid") {
+      const { default: pgPool } = await import("./pg-pool.mjs");
+      const meta = session.metadata ?? {};
+
+      if (meta.type === "reservation") {
+        const reservationId = Number(meta.reservationId);
+        const { rows } = await pgPool.query("SELECT payment_status, user_id FROM reservations WHERE id = $1", [reservationId]);
+        if (rows.length && rows[0].payment_status !== "paid") {
+          await pgPool.query("UPDATE reservations SET payment_status='paid' WHERE id=$1", [reservationId]);
+          const existing = await pgPool.query("SELECT id FROM reservation_payments WHERE reservation_id=$1", [reservationId]);
+          if (!existing.rows.length) {
+            await pgPool.query(
+              "INSERT INTO reservation_payments (reservation_id, amount, currency, status, method, paid_at) VALUES ($1,$2,'EUR','paid','stripe',NOW())",
+              [reservationId, (session.amount_total / 100).toFixed(2)]
+            );
+          }
+        }
+      } else if (meta.type === "coaching_request") {
+        const requestId = Number(meta.requestId);
+        const { rows: crRows } = await pgPool.query("SELECT payment_status FROM coaching_requests WHERE id=$1", [requestId]);
+        if (crRows.length && crRows[0].payment_status !== "paid") {
+          // Delegate to webhook handler logic by re-emitting — just mark paid here as minimum
+          await pgPool.query("UPDATE coaching_requests SET payment_status='paid' WHERE id=$1", [requestId]);
+        }
+      }
+    }
+
     return res.json({ status: session.payment_status, metadata: session.metadata });
   } catch (error) {
     return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to retrieve session" });
