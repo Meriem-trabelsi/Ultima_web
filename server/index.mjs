@@ -900,6 +900,25 @@ app.get("/api/reservations/:id/ticket.pdf", requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/reservations/:id/ticket-link — returns the public mobile-friendly download URL
+app.get("/api/reservations/:id/ticket-link", requireAuth, async (req, res) => {
+  try {
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const reservationId = Number(req.params.id);
+    const { rows } = await pgPool.query(
+      "SELECT qr_token, payment_status, user_id FROM reservations WHERE id = $1",
+      [reservationId]
+    );
+    if (!rows.length) return res.status(404).json({ message: "Reservation not found" });
+    if (rows[0].payment_status !== "paid") return res.status(402).json({ message: "Payment required" });
+    const baseUrl = getPublicWebBaseUrl(req).replace(/:5173$/, ":3001"); // server URL, not frontend
+    const url = `${baseUrl}/public/tickets/${reservationId}/download?qr=${rows[0].qr_token}`;
+    return res.json({ url });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to get ticket link" });
+  }
+});
+
 app.get("/public/tickets/:id/download", async (req, res) => {
   try {
     const reservationId = Number(req.params.id);
