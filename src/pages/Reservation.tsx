@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Calendar, MapPin, QrCode, CheckCircle, ArrowRight, Users, Search,
-  Building2, Sun, ChevronLeft, CreditCard, Clock,
+  Building2, Sun, Zap, ChevronLeft, CreditCard, Clock,
   Loader2, CheckCircle2, XCircle, AlertTriangle, Layers, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
