@@ -961,7 +961,7 @@ app.post("/api/payments/reservation/:id/checkout", requireAuth, async (req, res)
       `SELECT r.*, c.name AS court_name, c.price_per_hour, a.name AS arena_name
        FROM reservations r
        JOIN courts c ON c.id = r.court_id
-       JOIN arenas a ON a.id = r.arena_id
+       JOIN arenas a ON a.id = c.arena_id
        WHERE r.id = $1 AND r.user_id = $2`,
       [reservationId, req.user.sub]
     );
