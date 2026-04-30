@@ -162,6 +162,8 @@ const LAN_IP = (() => {
   }
   return "127.0.0.1";
 })();
+// Public base URL for QR codes — set PUBLIC_SERVER_URL in .env when using a tunnel (ngrok/cloudflared)
+const PUBLIC_SERVER_URL = String(process.env.PUBLIC_SERVER_URL ?? "").trim() || `http://${LAN_IP}:${PORT}`;
 
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY ?? "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
@@ -921,9 +923,7 @@ app.get("/api/reservations/:id/ticket-link", requireAuth, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ message: "Reservation not found" });
     if (rows[0].payment_status !== "paid") return res.status(402).json({ message: "Payment required" });
-    // Use LAN IP so phones on the same WiFi can reach the server directly
-    const serverBase = `http://${LAN_IP}:${PORT}`;
-    const url = `${serverBase}/public/tickets/${reservationId}/download?qr=${rows[0].qr_token}`;
+    const url = `${PUBLIC_SERVER_URL}/public/tickets/${reservationId}/download?qr=${rows[0].qr_token}`;
     return res.json({ url });
   } catch (error) {
     return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to get ticket link" });
