@@ -689,19 +689,19 @@ const Reservation = () => {
                 {" · "}{confirmedReservation.reservation_date}{" · "}{confirmedReservation.start_time}
               </p>
 
-              <div className="w-48 h-48 mx-auto rounded-2xl flex flex-col items-center justify-center border border-primary/20 mb-5 gap-3 bg-foreground/5 backdrop-blur-sm p-3"
-                style={{ boxShadow: "0 0 30px hsl(var(--primary) / 0.12)" }}>
-                <QrCode className="text-primary/85" size={80} />
-                <span className="text-[11px] uppercase tracking-widest text-muted-foreground">{t("res.success.qrHint")}</span>
+              <div className="w-48 h-48 mx-auto rounded-2xl flex flex-col items-center justify-center border border-amber-400/25 mb-5 gap-3 bg-amber-400/5 backdrop-blur-sm p-3"
+                style={{ boxShadow: "0 0 30px hsl(45 90% 55% / 0.10)" }}>
+                <QrCode className="text-amber-400/60" size={80} />
+                <span className="text-[11px] uppercase tracking-widest text-amber-400/70">Pay to unlock</span>
               </div>
 
-              <div className="flex flex-col gap-3 mt-4">
-                <Button className="glow-yellow h-11" onClick={resetFlow}>{t("res.success.new")}</Button>
-                <Button variant="outline" className="h-11 border-primary/25" onClick={() => void downloadReservationTicket(confirmedReservation.id)}>
-                  {t("res.success.download")}
-                </Button>
-                <p className="text-[11px] text-muted-foreground">{t("res.success.pdfNote")}</p>
-              </div>
+              <p className="text-sm text-muted-foreground mb-4">
+                Complete payment on the right to receive your PDF ticket and QR code.
+              </p>
+
+              <Button variant="ghost" className="text-muted-foreground text-sm" onClick={resetFlow}>
+                Book another court
+              </Button>
             </div>
 
             {/* Right: billing */}
