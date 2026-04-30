@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import multer from "multer";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
 import { Server as SocketIOServer } from "socket.io";
@@ -153,6 +154,15 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CIN_REGEX = /^\d{8}$/;
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
 const PUBLIC_WEB_BASE_URL = String(process.env.PUBLIC_WEB_BASE_URL ?? "").trim();
+const LAN_IP = (() => {
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const iface of ifaces ?? []) {
+      if (iface.family === "IPv4" && !iface.internal) return iface.address;
+    }
+  }
+  return "127.0.0.1";
+})();
+
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY ?? "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
 // TND is not a native Stripe currency — convert to EUR (approx 1 TND = 0.30 EUR)
@@ -911,8 +921,9 @@ app.get("/api/reservations/:id/ticket-link", requireAuth, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ message: "Reservation not found" });
     if (rows[0].payment_status !== "paid") return res.status(402).json({ message: "Payment required" });
-    const baseUrl = getPublicWebBaseUrl(req).replace(/:5173$/, ":3001"); // server URL, not frontend
-    const url = `${baseUrl}/public/tickets/${reservationId}/download?qr=${rows[0].qr_token}`;
+    // Use LAN IP so phones on the same WiFi can reach the server directly
+    const serverBase = `http://${LAN_IP}:${PORT}`;
+    const url = `${serverBase}/public/tickets/${reservationId}/download?qr=${rows[0].qr_token}`;
     return res.json({ url });
   } catch (error) {
     return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to get ticket link" });
