@@ -930,7 +930,7 @@ const Admin = () => {
                     <div className="w-2.5 h-2.5 rounded-full bg-green-400 animate-pulse" />
                     <span className="font-bold text-sm">Database</span>
                   </div>
-                  <p className="text-xs text-muted-foreground">MySQL — Connected</p>
+                  <p className="text-xs text-muted-foreground">PostgreSQL — Connected</p>
                 </div>
 
                 {/* WebSocket */}
