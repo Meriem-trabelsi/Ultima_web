@@ -36,7 +36,8 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres -d ultima_web"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 60
+      start_period: 5m
     ports:
       - "5433:5432"
     volumes:
@@ -70,10 +71,14 @@ services:
       PG_USER: postgres
       PG_PASSWORD: admin
       PG_DATABASE: ultima_web
+      DB_STARTUP_RETRY_ATTEMPTS: 240
+      DB_STARTUP_RETRY_DELAY_MS: 1000
       JWT_SECRET: ultima-demo-secret
       PORT: 3001
       REDIS_URL: redis://redis:6379
       SMARTPLAY_AI_URL: ${SMARTPLAY_AI_URL:-}
+      SMARTPLAY_GENERATE_BROWSER_PREVIEW: ${SMARTPLAY_GENERATE_BROWSER_PREVIEW:-1}
+      FFMPEG_PATH: ${FFMPEG_PATH:-ffmpeg}
       PUBLIC_WEB_BASE_URL: ${PUBLIC_WEB_BASE_URL:-http://localhost:5173}
       SMTP_HOST: ${SMTP_HOST_DOCKER:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
@@ -82,7 +87,7 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-noreply@ultima.local}
     ports:
-      - "3001:3001"
+      - "4001:3001"
     volumes: []
 
   web:

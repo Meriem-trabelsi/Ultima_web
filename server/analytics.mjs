@@ -101,13 +101,19 @@ export async function getPlayerMatchHistory(userId, limit = 20) {
 export async function getPlayerReservationHistory(userId, limit = 20) {
   const result = await pool.query(
     `SELECT r.id, r.reservation_date, r.start_time, r.end_time, r.status,
-            r.payment_status, r.total_price, r.num_players, r.notes, r.qr_token, r.created_at,
-            c.name AS court_name, a.name AS arena_name,
-            rp.amount, rp.currency, rp.method AS payment_method, rp.paid_at
+            r.payment_status, r.booking_type, r.total_price, r.num_players, r.notes, r.qr_token, r.created_at,
+            c.name AS court_name, c.court_type, c.surface_type, c.has_lighting,
+            a.name AS arena_name, a.city AS arena_city,
+            rp.amount, rp.currency, rp.method AS payment_method, rp.paid_at,
+            CONCAT(coach_u.first_name, ' ', coach_u.last_name) AS coach_name,
+            cp.headline AS coach_specialization
      FROM reservations r
      LEFT JOIN courts c ON c.id = r.court_id
      LEFT JOIN arenas a ON a.id = c.arena_id
      LEFT JOIN reservation_payments rp ON rp.reservation_id = r.id
+     LEFT JOIN coaching_requests cr ON cr.coaching_reservation_id = r.id
+     LEFT JOIN users coach_u ON coach_u.id = cr.coach_user_id
+     LEFT JOIN coach_profiles cp ON cp.user_id = cr.coach_user_id
      WHERE r.user_id = $1
      ORDER BY r.created_at DESC
      LIMIT $2`,

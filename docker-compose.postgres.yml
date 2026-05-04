@@ -13,7 +13,8 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres -d ultima_demo"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 60
+      start_period: 5m
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

@@ -2,22 +2,22 @@ import { useEffect, useState, useCallback } from "react";
 import Layout from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { getSessionUser } from "@/lib/session";
-import { useLocale } from "@/i18n/locale";
+import SmartPlayClipAnalysisPanel from "@/components/smartplay/SmartPlayClipAnalysisPanel";
+import CourtCalibrationPanel from "@/components/smartplay/CourtCalibrationPanel";
 import {
   Users, MapPin, Trophy, Activity, BarChart3, Shield, Settings,
-  CreditCard, Bell, TrendingUp, CheckCircle2, XCircle, Clock,
-  RefreshCw, ChevronRight, AlertCircle, Zap, Brain, Wifi, WifiOff,
-  Plus, Edit2, Trash2, UserCheck, UserX, Search, Filter, Award,
-  CalendarDays, Target, Star, Layers,
+  CreditCard, CheckCircle2, Clock,
+  RefreshCw, ChevronRight, AlertCircle, Zap, Brain, Wifi,
+  Plus, Trash2, UserCheck, UserX, Search, Award,
+  CalendarDays, Layers,
 } from "lucide-react";
 import {
-  BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, PieChart, Pie, Cell,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer,
 } from "recharts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ type AdminOverview = {
   users: Array<{
     id: number; first_name: string; last_name: string; email: string;
     role: string; platform_role?: string; status: string;
-    arena_name: string | null; created_at: string;
+    arena_id?: number | null; arena_name: string | null; created_at: string;
   }>;
   courts: Array<{
     id: number; name: string; status: string; has_summa: number;
@@ -50,13 +50,6 @@ type AdminReservation = {
   status: "confirmed" | "cancelled" | "completed"; court_name: string;
   arena_name: string; owner_name: string; owner_email: string;
   special_code?: string; payment_status?: string;
-};
-
-type ScoringMatch = {
-  id: number; status: string; score1: number[]; score2: number[];
-  player1_name: string; player2_name: string; court_name: string;
-  arena_name: string; competition_name?: string; score_source: string;
-  scheduled_at: string;
 };
 
 type RevenueSummary = {
@@ -108,8 +101,6 @@ function SBadge({ label }: { label: string }) {
   );
 }
 
-const COLORS = ["hsl(var(--primary))", "hsl(var(--ultima-olive))", "#6366f1", "#f59e0b", "#10b981"];
-
 // ── Stat Card ─────────────────────────────────────────────────────────────────
 
 function StatCard({ icon: Icon, label, value, sub, accent }: {
@@ -129,97 +120,6 @@ function StatCard({ icon: Icon, label, value, sub, accent }: {
   );
 }
 
-// ── Score Source Badge ────────────────────────────────────────────────────────
-
-function ScoreSourceBadge({ source }: { source: string }) {
-  const map: Record<string, { cls: string; label: string }> = {
-    manual: { cls: "bg-muted text-muted-foreground", label: "Manual" },
-    summa: { cls: "bg-blue-500/20 text-blue-300", label: "SUMMA" },
-    ai: { cls: "bg-purple-500/20 text-purple-300", label: "AI" },
-    corrected: { cls: "bg-amber-500/20 text-amber-300", label: "Corrected" },
-  };
-  const m = map[source] ?? map.manual;
-  return <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}</span>;
-}
-
-// ── Score Correction Modal ────────────────────────────────────────────────────
-
-function ScoreCorrectionModal({
-  match, onClose, onSaved,
-}: {
-  match: ScoringMatch;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [s1, setS1] = useState(match.score1.join(","));
-  const [s2, setS2] = useState(match.score2.join(","));
-  const [status, setStatus] = useState(match.status);
-  const [reason, setReason] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const submit = async () => {
-    const score1 = s1.split(",").map(Number).filter((n) => !isNaN(n));
-    const score2 = s2.split(",").map(Number).filter((n) => !isNaN(n));
-    if (!reason.trim()) { toast.error("Please provide a reason for the correction."); return; }
-    setSaving(true);
-    try {
-      await api(`/api/matches/${match.id}/score`, {
-        method: "PATCH",
-        body: JSON.stringify({ score1, score2, status, reason }),
-        authenticated: true,
-      });
-      toast.success("Score updated and correction logged.");
-      onSaved();
-      onClose();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update score.");
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="gradient-card rounded-2xl border border-border w-full max-w-md p-6">
-        <h3 className="text-lg font-display font-bold mb-1">Correct Score</h3>
-        <p className="text-xs text-muted-foreground mb-6">{match.player1_name} vs {match.player2_name}</p>
-        <div className="space-y-4">
-          <div>
-            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1 block">
-              {match.player1_name} Sets (comma-separated)
-            </label>
-            <Input value={s1} onChange={(e) => setS1(e.target.value)} placeholder="0,1,2" />
-          </div>
-          <div>
-            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1 block">
-              {match.player2_name} Sets (comma-separated)
-            </label>
-            <Input value={s2} onChange={(e) => setS2(e.target.value)} placeholder="2,1,0" />
-          </div>
-          <div>
-            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1 block">Status</label>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
-            >
-              {["live", "upcoming", "finished"].map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1 block">Reason *</label>
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Score entry error by referee" />
-          </div>
-        </div>
-        <div className="flex gap-3 mt-6">
-          <Button variant="outline" className="flex-1" onClick={onClose}>Cancel</Button>
-          <Button className="flex-1" onClick={submit} disabled={saving}>
-            {saving ? "Saving…" : "Save Correction"}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Sidebar nav items ─────────────────────────────────────────────────────────
 
 const navItems = [
@@ -227,7 +127,7 @@ const navItems = [
   { id: "users", label: "Users", icon: Users },
   { id: "courts", label: "Courts", icon: MapPin },
   { id: "reservations", label: "Reservations", icon: CalendarDays },
-  { id: "scoring", label: "Scoring", icon: Target },
+  { id: "scoring", label: "Analysis", icon: Layers },
   { id: "competitions", label: "Competitions", icon: Trophy },
   { id: "revenue", label: "Revenue", icon: CreditCard },
   { id: "logs", label: "Activity Logs", icon: Activity },
@@ -237,20 +137,18 @@ const navItems = [
 // ── Main Component ─────────────────────────────────────────────────────────────
 
 const Admin = () => {
-  const { t } = useLocale();
   const user = getSessionUser();
   const isSuperAdmin = user?.role === "super_admin";
 
   const [activeSection, setActiveSection] = useState("overview");
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [reservations, setReservations] = useState<AdminReservation[]>([]);
-  const [scoring, setScoring] = useState<{ matches: ScoringMatch[]; recentActivity: unknown[] } | null>(null);
   const [revenue, setRevenue] = useState<RevenueSummary | null>(null);
   const [aiStatus, setAiStatus] = useState<SmartPlayStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
-  const [correcting, setCorrecting] = useState<ScoringMatch | null>(null);
+  const [pendingUserUpdates, setPendingUserUpdates] = useState<Record<number, { role: "player" | "coach" | "admin"; arenaId: number | null }>>({});
 
   const [form, setForm] = useState({ nom: "", prenom: "", email: "", password: "", role: "player", arenaId: "", arenaName: "", cinNumber: "" });
   const [courtForm, setCourtForm] = useState({ name: "", sport: "Padel", location: "", arenaId: "", hasSumma: false, minPlayers: 2, maxPlayers: 4, openingTime: "08:00", closingTime: "22:00" });
@@ -275,11 +173,6 @@ const Admin = () => {
         .then((r) => setReservations(r.reservations))
         .catch(() => toast.error("Failed to load reservations."));
     }
-    if (activeSection === "scoring" && !scoring) {
-      api<typeof scoring>("/api/admin/scoring", { authenticated: true })
-        .then(setScoring)
-        .catch(() => toast.error("Failed to load scoring data."));
-    }
     if (activeSection === "revenue" && !revenue) {
       api<RevenueSummary>("/api/admin/revenue", { authenticated: true })
         .then(setRevenue)
@@ -301,11 +194,34 @@ const Admin = () => {
     } catch (e) { toast.error(e instanceof Error ? e.message : "Error updating status."); } finally { setSaving(false); }
   };
 
-  const updateUserRole = async (userId: number, role: "player" | "coach") => {
+  const queueUserUpdate = (userId: number, patch: Partial<{ role: "player" | "coach" | "admin"; arenaId: number | null }>) => {
+    const user = overview?.users.find((u) => u.id === userId);
+    if (!user) return;
+    setPendingUserUpdates((current) => ({
+      ...current,
+      [userId]: {
+        role: patch.role ?? (current[userId]?.role ?? user.role as "player" | "coach" | "admin"),
+        arenaId: patch.arenaId ?? (current[userId]?.arenaId ?? user.arena_id ?? Number(overview?.arenas[0]?.id ?? 0)),
+      },
+    }));
+  };
+
+  const clearQueuedUserUpdate = (userId: number) => {
+    setPendingUserUpdates((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
+  };
+
+  const updateUserRole = async (userId: number) => {
+    const pending = pendingUserUpdates[userId];
+    if (!pending) return;
     setSaving(true);
     try {
-      await api(`/api/admin/users/${userId}/role`, { method: "PATCH", body: JSON.stringify({ role }), authenticated: true });
-      toast.success(`Role updated to ${role}.`);
+      await api(`/api/admin/users/${userId}/role`, { method: "PATCH", body: JSON.stringify(pending), authenticated: true });
+      toast.success(`Role updated to ${pending.role}.`);
+      clearQueuedUserUpdate(userId);
       await loadOverview();
     } catch (e) { toast.error(e instanceof Error ? e.message : "Error updating role."); } finally { setSaving(false); }
   };
@@ -458,7 +374,7 @@ const Admin = () => {
                       <div key={court.id} className="flex items-center justify-between py-2 border-b border-border/30 last:border-0">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="text-sm font-medium truncate">{court.name}</span>
-                          {court.has_summa ? <Zap size={12} className="text-primary flex-shrink-0" title="SUMMA" /> : null}
+                          {court.has_summa ? <span title="SUMMA"><Zap size={12} className="text-primary flex-shrink-0" /></span> : null}
                         </div>
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground">{court.sport}</span>
@@ -539,7 +455,9 @@ const Admin = () => {
                     <Input placeholder="Last name" value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} />
                     <Input placeholder="Email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
                     <Input placeholder="Password" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-                    <Input placeholder="CIN (8 digits)" value={form.cinNumber} onChange={(e) => setForm({ ...form, cinNumber: e.target.value })} />
+                    {form.role !== "admin" && (
+                      <Input placeholder="CIN (8 digits)" value={form.cinNumber} onChange={(e) => setForm({ ...form, cinNumber: e.target.value })} />
+                    )}
                     <select className="bg-background border border-border rounded-lg px-3 py-2 text-sm" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
                       <option value="player">Player</option>
                       <option value="coach">Coach</option>
@@ -569,7 +487,12 @@ const Admin = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredUsers.map((u) => (
+                    {filteredUsers.map((u) => {
+                      const pending = pendingUserUpdates[u.id];
+                      const selectedRole = pending?.role ?? (u.role as "player" | "coach" | "admin");
+                      const selectedArenaId = pending?.arenaId ?? u.arena_id ?? Number(overview?.arenas[0]?.id ?? 0);
+                      const hasPending = Boolean(pending && (pending.role !== u.role || Number(pending.arenaId) !== Number(u.arena_id)));
+                      return (
                       <tr key={u.id} className="border-b border-border/20 hover:bg-muted/20 transition-colors">
                         <td className="py-3 pr-4 font-medium">{u.first_name} {u.last_name}</td>
                         <td className="py-3 pr-4 text-muted-foreground text-xs">{u.email}</td>
@@ -577,20 +500,72 @@ const Admin = () => {
                         <td className="py-3 pr-4"><SBadge label={u.status} /></td>
                         <td className="py-3 pr-4 text-xs text-muted-foreground">{u.arena_name ?? "—"}</td>
                         <td className="py-3">
-                          <div className="flex items-center gap-1.5">
-                            {u.role === "player" && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {isSuperAdmin && u.platform_role !== "super_admin" && (
+                              <>
+                                <select
+                                  className="rounded-lg border border-border bg-background px-2 py-1 text-[11px]"
+                                  value={selectedRole}
+                                  onChange={(e) => queueUserUpdate(u.id, { role: e.target.value as "player" | "coach" | "admin" })}
+                                  disabled={saving}
+                                >
+                                  <option value="player">Player</option>
+                                  <option value="coach">Coach</option>
+                                  <option value="admin">Admin</option>
+                                </select>
+                                <select
+                                  className="max-w-[150px] rounded-lg border border-border bg-background px-2 py-1 text-[11px]"
+                                  value={String(selectedArenaId)}
+                                  onChange={(e) => queueUserUpdate(u.id, { arenaId: Number(e.target.value) })}
+                                  disabled={saving}
+                                >
+                                  {(overview?.arenas ?? []).map((arena) => (
+                                    <option key={arena.id} value={arena.id}>{arena.name}</option>
+                                  ))}
+                                </select>
+                                {hasPending && (
+                                  <>
+                                    <button
+                                      onClick={() => updateUserRole(u.id)}
+                                      className="text-[10px] font-bold px-2 py-1 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                                      disabled={saving}
+                                    >Confirm</button>
+                                    <button
+                                      onClick={() => clearQueuedUserUpdate(u.id)}
+                                      className="text-[10px] font-bold px-2 py-1 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+                                      disabled={saving}
+                                    >Cancel</button>
+                                  </>
+                                )}
+                              </>
+                            )}
+                            {!isSuperAdmin && u.role === "player" && (
                               <button
-                                onClick={() => updateUserRole(u.id, "coach")}
+                                onClick={() => queueUserUpdate(u.id, { role: "coach", arenaId: u.arena_id })}
                                 className="text-[10px] font-bold px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors"
                                 disabled={saving}
                               >→ Coach</button>
                             )}
-                            {u.role === "coach" && (
+                            {!isSuperAdmin && u.role === "coach" && (
                               <button
-                                onClick={() => updateUserRole(u.id, "player")}
+                                onClick={() => queueUserUpdate(u.id, { role: "player", arenaId: u.arena_id })}
                                 className="text-[10px] font-bold px-2 py-1 rounded-lg bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors"
                                 disabled={saving}
                               >→ Player</button>
+                            )}
+                            {!isSuperAdmin && hasPending && (
+                              <>
+                                <button
+                                  onClick={() => updateUserRole(u.id)}
+                                  className="text-[10px] font-bold px-2 py-1 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                                  disabled={saving}
+                                >Confirm</button>
+                                <button
+                                  onClick={() => clearQueuedUserUpdate(u.id)}
+                                  className="text-[10px] font-bold px-2 py-1 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+                                  disabled={saving}
+                                >Cancel</button>
+                              </>
                             )}
                             <button
                               onClick={() => updateUserStatus(u.id, u.status === "active" ? "inactive" : "active")}
@@ -609,7 +584,7 @@ const Admin = () => {
                           </div>
                         </td>
                       </tr>
-                    ))}
+                    )})}
                     {!filteredUsers.length && (
                       <tr><td colSpan={6} className="py-12 text-center text-muted-foreground text-sm">No users found</td></tr>
                     )}
@@ -742,79 +717,29 @@ const Admin = () => {
             </div>
           )}
 
-          {/* ── Scoring ── */}
+          {/* ── Analysis ── */}
           {activeSection === "scoring" && (
             <div className="space-y-6">
               <h2 className="text-2xl font-display font-bold flex items-center gap-3">
-                <Target size={24} className="text-primary" /> Smart Scoring
+                <Layers size={24} className="text-primary" /> Video Analysis
               </h2>
-              {!scoring ? (
-                <div className="space-y-3">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-xl" />)}</div>
-              ) : (
-                <>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-xs font-bold uppercase tracking-widest text-muted-foreground border-b border-border/50">
-                          <th className="text-left py-3 pr-4">Match</th>
-                          <th className="text-left py-3 pr-4">Score</th>
-                          <th className="text-left py-3 pr-4">Status</th>
-                          <th className="text-left py-3 pr-4">Source</th>
-                          <th className="text-left py-3">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {scoring.matches.map((m) => (
-                          <tr key={m.id} className="border-b border-border/20 hover:bg-muted/20 transition-colors">
-                            <td className="py-3 pr-4">
-                              <p className="font-medium text-sm">{m.player1_name} <span className="text-muted-foreground">vs</span> {m.player2_name}</p>
-                              <p className="text-xs text-muted-foreground">{m.court_name} · {m.arena_name}</p>
-                            </td>
-                            <td className="py-3 pr-4">
-                              <span className="font-mono text-sm font-bold">
-                                {(m.score1 ?? []).join("-")} | {(m.score2 ?? []).join("-")}
-                              </span>
-                            </td>
-                            <td className="py-3 pr-4"><SBadge label={m.status} /></td>
-                            <td className="py-3 pr-4"><ScoreSourceBadge source={m.score_source ?? "manual"} /></td>
-                            <td className="py-3">
-                              <button
-                                onClick={() => setCorrecting(m)}
-                                className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-colors"
-                              >
-                                <Edit2 size={10} /> Correct
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                        {!scoring.matches.length && (
-                          <tr><td colSpan={5} className="py-12 text-center text-muted-foreground">No matches found</td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  {(scoring.recentActivity as Array<{ id: number; first_name: string; last_name: string; changed_by_role: string; player1_name: string; player2_name: string; created_at: string; reason: string }>).length > 0 && (
-                    <div className="gradient-card rounded-2xl border border-border/50 p-5">
-                      <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-4 flex items-center gap-2">
-                        <Activity size={14} /> Recent Score Corrections
-                      </h3>
-                      <div className="space-y-3">
-                        {(scoring.recentActivity as Array<{ id: number; first_name: string; last_name: string; changed_by_role: string; player1_name: string; player2_name: string; created_at: string; reason: string }>).map((item) => (
-                          <div key={item.id} className="flex items-start gap-3 text-xs border-b border-border/20 pb-3 last:border-0 last:pb-0">
-                            <RBadge label={item.changed_by_role} />
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium">{item.first_name} {item.last_name} corrected: {item.player1_name} vs {item.player2_name}</p>
-                              {item.reason && <p className="text-muted-foreground">{item.reason}</p>}
-                            </div>
-                            <span className="text-muted-foreground whitespace-nowrap">{new Date(item.created_at).toLocaleDateString()}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
+              <CourtCalibrationPanel />
+              <SmartPlayClipAnalysisPanel users={overview?.users ?? []} />
+              {/* VAR Scoring Coming Soon */}
+              <div className="gradient-card rounded-2xl border border-primary/20 p-6 flex items-start gap-4">
+                <div className="p-3 rounded-xl bg-primary/10 flex-shrink-0">
+                  <Zap size={22} className="text-primary" />
+                </div>
+                <div>
+                  <p className="font-bold flex items-center gap-2 mb-1">
+                    VAR Review System
+                    <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-primary/15 text-primary border border-primary/20">Coming Soon</span>
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    AI-powered scoring, automatic point detection, and VAR-reviewed match results will appear here. Existing match score data is preserved and will be migrated when the system launches.
+                  </p>
+                </div>
+              </div>
             </div>
           )}
 
@@ -979,17 +904,6 @@ const Admin = () => {
         </div>
       </div>
 
-      {correcting && (
-        <ScoreCorrectionModal
-          match={correcting}
-          onClose={() => setCorrecting(null)}
-          onSaved={() => {
-            api<typeof scoring>("/api/admin/scoring", { authenticated: true })
-              .then(setScoring)
-              .catch(() => {});
-          }}
-        />
-      )}
     </Layout>
   );
 };

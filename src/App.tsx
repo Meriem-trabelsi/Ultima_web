@@ -35,6 +35,15 @@ import PaymentCancel from "./pages/PaymentCancel";
 
 const queryClient = new QueryClient();
 
+// Redirect to login when the refresh token expires / is invalid
+if (typeof window !== "undefined") {
+  window.addEventListener("auth:session-expired", () => {
+    if (!window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login";
+    }
+  });
+}
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <LocaleProvider>

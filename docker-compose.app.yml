@@ -13,7 +13,7 @@ services:
     working_dir: /app
     volumes:
       - ./:/app
-    command: sh -c "npm install && npm run server:localdb:dev"
+    command: sh -c "apt-get update && apt-get install -y ffmpeg && npm install && npm run server:localdb:dev"
     environment:
       DB_CLIENT: postgres
       PG_HOST: postgres
@@ -21,7 +21,11 @@ services:
       PG_USER: postgres
       PG_PASSWORD: admin
       PG_DATABASE: ultima_demo
+      DB_STARTUP_RETRY_ATTEMPTS: 240
+      DB_STARTUP_RETRY_DELAY_MS: 1000
       PORT: 3001
+      SMARTPLAY_GENERATE_BROWSER_PREVIEW: 1
+      FFMPEG_PATH: ffmpeg
       PUBLIC_WEB_BASE_URL: http://localhost:5173
       JWT_SECRET: ultima-demo-secret
       SMTP_HOST: mailpit
@@ -29,7 +33,7 @@ services:
       SMTP_SECURE: "false"
       SMTP_FROM: noreply@ultima.local
     ports:
-      - "3001:3001"
+      - "4001:3001"
     depends_on:
       postgres:
         condition: service_healthy

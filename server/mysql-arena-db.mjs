@@ -2628,8 +2628,8 @@ export async function updateMembershipStatus(actor, targetUserId, nextStatus) {
   }
 }
 
-export async function updateMembershipRole(actor, targetUserId, nextRole) {
-  if (!["player", "coach"].includes(nextRole)) {
+export async function updateMembershipRole(actor, targetUserId, nextRole, nextArenaId = null) {
+  if (!["player", "coach", "admin"].includes(nextRole)) {
     throw new Error("Invalid role");
   }
 
@@ -2651,33 +2651,40 @@ export async function updateMembershipRole(actor, targetUserId, nextRole) {
       throw new Error("User not found");
     }
 
-    if (target.platform_role === "super_admin" || target.membership_role === "admin") {
-      throw new Error("Admin roles cannot be changed here");
+    if (target.platform_role === "super_admin") {
+      throw new Error("Super admin roles cannot be changed here");
     }
 
-    if (actor.effective_role === "admin" && target.arena_id !== actor.arena_id) {
-      throw new Error("You can only manage users in your arena");
+    let resolvedArenaId = nextArenaId ? Number(nextArenaId) : Number(target.arena_id);
+    if (actor.effective_role === "super_admin") {
+      if (!resolvedArenaId) throw new Error("Arena is required");
+    } else {
+      if (target.arena_id !== actor.arena_id) throw new Error("You can only manage users in your arena");
+      if (!["player", "coach"].includes(nextRole)) throw new Error("Arena admins can only assign player or coach roles");
+      if (target.membership_role === "admin") throw new Error("Only a super admin can change admin roles");
+      resolvedArenaId = Number(actor.arena_id);
     }
 
-    if (!["player", "coach"].includes(target.membership_role)) {
-      throw new Error("Only player and coach accounts can be updated here");
-    }
-
-    if (target.membership_role === nextRole) {
+    if (target.membership_role === nextRole && Number(target.arena_id) === Number(resolvedArenaId)) {
+      await connection.commit();
       return target;
     }
 
-    if (nextRole === "coach") {
-      await assertCanAddArenaMember(target.arena_id, "coach", connection);
-    } else {
-      await assertCanAddArenaMember(target.arena_id, "player", connection);
-    }
+    await assertCanAddArenaMember(resolvedArenaId, nextRole, connection);
 
     await connection.query("UPDATE users SET role = ? WHERE id = ?", [nextRole, targetUserId]);
-    await connection.query("UPDATE arena_memberships SET role = ? WHERE user_id = ?", [nextRole, targetUserId]);
+    const [membershipRows] = await connection.query("SELECT id, arena_id FROM arena_memberships WHERE user_id = ? ORDER BY id ASC", [targetUserId]);
+    const existingForArena = membershipRows.find((row) => Number(row.arena_id) === Number(resolvedArenaId));
+    const keptMembership = existingForArena ?? membershipRows[0] ?? null;
+    if (keptMembership?.id) {
+      await connection.query("UPDATE arena_memberships SET arena_id = ?, role = ?, status = 'active' WHERE id = ?", [resolvedArenaId, nextRole, keptMembership.id]);
+      await connection.query("DELETE FROM arena_memberships WHERE user_id = ? AND id <> ?", [targetUserId, keptMembership.id]);
+    } else {
+      await connection.query("INSERT INTO arena_memberships (arena_id, user_id, role, status, created_at) VALUES (?, ?, ?, 'active', NOW())", [resolvedArenaId, targetUserId, nextRole]);
+    }
 
     await addActivityLog(connection, {
-      arenaId: target.arena_id,
+      arenaId: resolvedArenaId,
       actorUserId: actor.id,
       actorName: `${actor.first_name} ${actor.last_name}`,
       action: "Role utilisateur mis a jour",

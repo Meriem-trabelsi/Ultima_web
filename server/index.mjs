@@ -7,7 +7,9 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import { Server as SocketIOServer } from "socket.io";
 import {
   DB_CLIENT_REQUESTED,
@@ -129,10 +131,34 @@ import {
 } from "./analytics.mjs";
 import {
   getSmartPlayStatus,
+  createAiAnalysisJobRecord,
+  createAiUploadedClip,
+  createOrUpdateAiClipJob,
   createAnalysisJob,
+  getAiClipDetails,
+  getAiAnalysisJobByExternalJobId,
+  getLatestAiAnalysisJobForMatch,
+  listAiUploadedClips,
   listAnalysisJobs,
+  listAiScoringEventsForMatch,
   getMatchAnalysis,
   getPlayerAiMetrics,
+  saveAiClipEvents,
+  saveAiScoringEventsForJob,
+  updateAiUploadedClipStorage,
+  updateAiUploadedClipStatus,
+  updateAiAnalysisJobFromService,
+  deleteAiUploadedClip,
+  shareClipWithPlayers,
+  listMySmartPlayClips,
+  listCourtsWithCalibrations,
+  listCourtCalibrations,
+  getCourtCalibration,
+  getActiveCalibrationForCourt,
+  createCourtCalibration,
+  saveCalibrationKeypoints,
+  activateCourtCalibration,
+  deleteCourtCalibration,
 } from "./smartplay.mjs";
 
 const app = express();
@@ -143,13 +169,17 @@ const io = new SocketIOServer(httpServer, {
   },
 });
 
-const PORT = Number(process.env.PORT ?? 3001);
+const PORT = Number(process.env.PORT ?? 4001);
 const JWT_SECRET = process.env.JWT_SECRET ?? "ultima-demo-secret";
 const WEBHOOK_SECRET = process.env.BILLING_WEBHOOK_SECRET ?? "";
 const WEBHOOK_SIGNATURE_SECRET = process.env.BILLING_WEBHOOK_SIGNATURE_SECRET ?? process.env.BILLING_SIGNATURE_SECRET ?? JWT_SECRET;
 const ENABLE_TEST_SEED = process.env.ENABLE_TEST_SEED === "1";
 const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS ?? 14);
 const MAX_VIDEO_UPLOAD_MB = Number(process.env.MAX_VIDEO_UPLOAD_MB ?? 2048);
+const SMARTPLAY_CLIP_UPLOAD_MB = Number(process.env.SMARTPLAY_CLIP_UPLOAD_MB ?? 12288);
+const LONG_UPLOAD_REQUEST_TIMEOUT_MS = Number(process.env.LONG_UPLOAD_REQUEST_TIMEOUT_MS ?? 3 * 60 * 60 * 1000);
+const SMARTPLAY_GENERATE_BROWSER_PREVIEW = process.env.SMARTPLAY_GENERATE_BROWSER_PREVIEW !== "0";
+const FFMPEG_PATH = String(process.env.FFMPEG_PATH ?? "ffmpeg").trim() || "ffmpeg";
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CIN_REGEX = /^\d{8}$/;
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
@@ -164,9 +194,26 @@ const LAN_IP = (() => {
 })();
 // Public base URL for QR codes — set PUBLIC_SERVER_URL in .env when using a tunnel (ngrok/cloudflared)
 const PUBLIC_SERVER_URL = String(process.env.PUBLIC_SERVER_URL ?? "").trim() || `http://${LAN_IP}:${PORT}`;
+httpServer.requestTimeout = LONG_UPLOAD_REQUEST_TIMEOUT_MS;
+httpServer.timeout = LONG_UPLOAD_REQUEST_TIMEOUT_MS;
+httpServer.headersTimeout = Math.max(120000, Math.min(LONG_UPLOAD_REQUEST_TIMEOUT_MS, 10 * 60 * 1000));
 
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY ?? "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
+const SMARTPLAY_AI_URL = String(process.env.SMARTPLAY_AI_URL ?? "").trim().replace(/\/+$/, "");
+const SMARTPLAY_PROXY_TIMEOUT_MS = Number(process.env.SMARTPLAY_PROXY_TIMEOUT_MS ?? 120000);
+const SMARTPLAY_V1_MATCH_CONFIG = {
+  match_0004_padel: {
+    match_id: "match_0004_padel",
+    camera_id: "camera_01",
+    ball_tracks: "data/processed/ball_yolo/match_0004_padel/camera_01_full_norender/ball_track.parquet",
+    player_tracks: "data/processed/match_0004_padel/players_tracks_bytetrack_full/camera_01_tracks.parquet",
+    out_dir: "data/processed/final_all_in_one/match_0004_padel_full_scoring_v2/camera_01",
+    input_video_path: "data/processed/matches/match_0004_padel/cameras/camera_01_main.mp4",
+    debug_video_path: "data/processed/final_all_in_one/match_0004_padel_full_scoring_v2/camera_01/scoring_v2_debug_full_with_frame_counter.mp4",
+    max_frames: 45934,
+  },
+};
 // TND is not a native Stripe currency — convert to EUR (approx 1 TND = 0.30 EUR)
 const TND_TO_EUR_RATE = 0.30;
 const uploadsDir = path.resolve(process.cwd(), "uploads");
@@ -340,6 +387,7 @@ app.use("/uploads", express.static(uploadsDir));
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     status: "ok",
+    smartplayClipApiVersion: 3,
     db: {
       requested: DB_CLIENT_REQUESTED,
       selected: DB_CLIENT_SELECTED,
@@ -438,10 +486,243 @@ function optionalAuth(req, _res, next) {
   return next();
 }
 
+function requireAuthUnlessLocal(req, res, next) {
+  if (isLocalRequest(req)) {
+    return optionalAuth(req, res, next);
+  }
+  return requireAuth(req, res, next);
+}
+
+function getSmartPlayMatchConfig(matchId) {
+  return SMARTPLAY_V1_MATCH_CONFIG[String(matchId ?? "").trim()] ?? null;
+}
+
+function sendSmartPlayNotConfigured(res) {
+  return res.status(503).json({
+    message: "SmartPlay AI service is not configured. Set SMARTPLAY_AI_URL to enable this endpoint.",
+  });
+}
+
+function smartPlayPath(pathname) {
+  return `${SMARTPLAY_AI_URL}${pathname}`;
+}
+
+async function fetchSmartPlay(pathname, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SMARTPLAY_PROXY_TIMEOUT_MS);
+  try {
+    return await fetch(smartPlayPath(pathname), {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readSmartPlayResponse(response) {
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+  if (contentType.includes("application/json")) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { message: text };
+    }
+  }
+  return { message: text };
+}
+
+function sendSmartPlayFetchError(res, error) {
+  const isTimeout = error?.name === "AbortError";
+  return res.status(isTimeout ? 504 : 502).json({
+    message: isTimeout
+      ? "SmartPlay AI service timed out."
+      : "SmartPlay AI service is unavailable.",
+    detail: error instanceof Error ? error.message : String(error),
+  });
+}
+
+async function proxySmartPlayJson(res, pathname, options = {}) {
+  if (!SMARTPLAY_AI_URL) {
+    return sendSmartPlayNotConfigured(res);
+  }
+
+  try {
+    const response = await fetchSmartPlay(pathname, options);
+    const body = await readSmartPlayResponse(response);
+    return res.status(response.status).json(body ?? {});
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
+  }
+}
+
+async function callSmartPlayJson(pathname, options = {}) {
+  const response = await fetchSmartPlay(pathname, options);
+  const body = await readSmartPlayResponse(response);
+  return { response, body };
+}
+
+function toScoringV2Payload(matchConfig, requestBody = {}) {
+  return {
+    match_id: matchConfig.match_id,
+    camera_id: matchConfig.camera_id,
+    ball_tracks: matchConfig.ball_tracks,
+    player_tracks: matchConfig.player_tracks,
+    out_dir: matchConfig.out_dir,
+    max_frames: matchConfig.max_frames,
+    render_debug: Boolean(requestBody?.render_debug ?? requestBody?.renderDebug ?? false),
+  };
+}
+
+async function persistAiEventsForServiceJob(serviceJob) {
+  const storedJob = await getAiAnalysisJobByExternalJobId(serviceJob?.job_id);
+  if (!storedJob || serviceJob?.status !== "done") {
+    return { saved: 0 };
+  }
+
+  const { response, body } = await callSmartPlayJson(
+    `/matches/${encodeURIComponent(storedJob.external_match_key)}/${encodeURIComponent(storedJob.camera_id)}/events`
+  );
+  if (!response.ok) {
+    return { saved: 0, error: body?.message ?? body?.detail ?? "Unable to load SmartPlay events." };
+  }
+
+  const events = Array.isArray(body?.events) ? body.events : [];
+  return saveAiScoringEventsForJob({ jobId: serviceJob.job_id, events });
+}
+
+function safePathSegment(value, fallback = "unknown") {
+  const cleaned = String(value ?? "").replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned || fallback;
+}
+
+function smartplayClipPublicPath(storedVideoPath) {
+  const rawPath = String(storedVideoPath ?? "");
+  if (!rawPath) return "";
+  const normalized = rawPath.replace(/\\/g, "/");
+  if (normalized.startsWith("uploads/")) return `/${normalized}`;
+  if (path.isAbsolute(rawPath)) {
+    const relativeToUploads = path.relative(uploadsDir, rawPath).replace(/\\/g, "/");
+    if (relativeToUploads && !relativeToUploads.startsWith("..") && !path.isAbsolute(relativeToUploads)) {
+      return `/uploads/${relativeToUploads}`;
+    }
+    const relativeToProject = path.relative(process.cwd(), rawPath).replace(/\\/g, "/");
+    if (relativeToProject && !relativeToProject.startsWith("..") && !path.isAbsolute(relativeToProject)) {
+      return `/${relativeToProject}`;
+    }
+  }
+  return `/${normalized.replace(/^\/+/, "")}`;
+}
+
+function smartplayClipPreviewPath(storedVideoPath) {
+  const rawPath = String(storedVideoPath ?? "");
+  if (!rawPath) return "";
+  return path.join(path.dirname(rawPath), "preview.mp4");
+}
+
+function isSupportedHomographyFile(filePath) {
+  return [".json", ".npy", ".npz"].includes(path.extname(filePath).toLowerCase());
+}
+
+function smartplayClipPayload(clip) {
+  const previewPath = smartplayClipPreviewPath(clip.storedVideoPath);
+  const hasPreview = Boolean(previewPath && fs.existsSync(path.resolve(previewPath)));
+  return {
+    ...clip,
+    videoUrl: smartplayClipPublicPath(clip.storedVideoPath),
+    previewVideoUrl: hasPreview ? smartplayClipPublicPath(previewPath) : null,
+  };
+}
+
+async function createBrowserPreviewVideo(inputPath, outputPath) {
+  if (!SMARTPLAY_GENERATE_BROWSER_PREVIEW) {
+    return { created: false, reason: "disabled" };
+  }
+
+  await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+  return new Promise((resolve) => {
+    const args = [
+      "-y",
+      "-i", inputPath,
+      "-map", "0:v:0",
+      "-map", "0:a?",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "23",
+      "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      outputPath,
+    ];
+    const ffmpeg = spawn(FFMPEG_PATH, args, { windowsHide: true });
+    let stderr = "";
+    ffmpeg.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    ffmpeg.on("error", (error) => {
+      resolve({ created: false, reason: error.code === "ENOENT" ? "ffmpeg_not_found" : error.message });
+    });
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        resolve({ created: true });
+      } else {
+        resolve({ created: false, reason: stderr.trim().slice(-800) || `ffmpeg exited with code ${code}` });
+      }
+    });
+  });
+}
+
+function smartplayAnnotationCommand(clip, outputJsonl) {
+  return [
+    "cd C:\\Users\\USER\\OneDrive\\Documents\\GitHub\\workspace\\smartplay_ai",
+    "conda activate smartplay_ai",
+    "$env:PYTHONPATH=\".\"",
+    `python scripts\\court_geometry\\17_manual_keypoints_video_annotator.py --sport ${clip.sportType ?? "padel"} --video_path "${path.resolve(clip.storedVideoPath)}" --output_jsonl "${outputJsonl}" --start_frame 0`,
+  ].join("\n");
+}
+
+async function proxySmartPlayVideo(res, pathname, fallbackMessage = "Video not available.") {
+  if (!SMARTPLAY_AI_URL) return sendSmartPlayNotConfigured(res);
+  try {
+    const response = await fetchSmartPlay(pathname);
+    if (!response.ok) {
+      const body = await readSmartPlayResponse(response);
+      return res.status(response.status).json(body ?? { message: fallbackMessage });
+    }
+    if (!response.body) return res.status(502).json({ message: "SmartPlay AI returned an empty video response." });
+    const contentType = response.headers.get("content-type");
+    const contentLength = response.headers.get("content-length");
+    if (contentType) res.setHeader("content-type", contentType);
+    if (contentLength) res.setHeader("content-length", contentLength);
+    return Readable.fromWeb(response.body).pipe(res);
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
+  }
+}
+
+function sendLocalVideoFile(res, filePath, fallbackMessage = "Video not available.") {
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    return res.status(404).json({ message: fallbackMessage, path: resolved });
+  }
+  return res.sendFile(resolved, {
+    headers: {
+      "content-type": "video/mp4",
+      "content-disposition": `inline; filename="${path.basename(resolved)}"`,
+    },
+  });
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     service: "ultima-demo-api",
+    smartplayClipApiVersion: 3,
     timestamp: new Date().toISOString(),
   });
 });
@@ -825,7 +1106,7 @@ app.post("/api/reservations", requireAuth, async (req, res) => {
       title: "Reservation confirmed",
       body: `Your reservation for ${court.name} on ${reservationDate} from ${startTime} to ${endTime} is confirmed.`,
       type: "reservation",
-      linkUrl: "/reservation",
+      linkUrl: "/performance?tab=reservations",
     });
 
     return res.status(201).json({ reservation });
@@ -1198,7 +1479,7 @@ app.get("/api/payments/session/:sessionId", requireAuth, async (req, res) => {
 
           try {
             await createNotification({ userId: cr.coach_user_id, title: "Session booked & paid", body: `Session on ${cr.requested_date} at ${String(cr.requested_start_time).slice(0,5)} is confirmed.`, type: "payment", linkUrl: "/coach" });
-            await createNotification({ userId: cr.player_user_id, title: "Payment confirmed — session booked!", body: `Your coaching session on ${cr.requested_date} is confirmed.`, type: "payment", linkUrl: "/coaching-requests" });
+            await createNotification({ userId: cr.player_user_id, title: "Payment confirmed — session booked!", body: `Your coaching session on ${cr.requested_date} is confirmed.`, type: "payment", linkUrl: "/performance?tab=reservations" });
           } catch (_) {}
         }
       }
@@ -1252,7 +1533,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
             title: "Payment confirmed",
             body: `Your court reservation #${reservationId} is confirmed. Download your ticket below.`,
             type: "payment",
-            linkUrl: `/payment/success?type=reservation&id=${reservationId}`,
+            linkUrl: `/performance?tab=reservations`,
           });
         }
       } else if (session.metadata?.type === "coaching_request") {
@@ -1311,7 +1592,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
             title: "Payment confirmed — session booked!",
             body: `Your coaching session on ${cr.requested_date} at ${String(cr.requested_start_time).slice(0,5)} is confirmed.`,
             type: "payment",
-            linkUrl: `/payment/success?type=coaching&id=${requestId}`,
+            linkUrl: `/performance?tab=reservations`,
           });
         }
       }
@@ -1612,8 +1893,8 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
     const normalizedRole = role === "admin" ? "admin" : role === "coach" ? "coach" : "player";
 
     if (normalizedRole === "admin") {
-      if (!arenaName || !email || !password) {
-        return res.status(400).json({ message: "Nom de l'Arena, Email et Mot de passe sont requis" });
+      if (!email || !password || (!arenaId && !arenaName)) {
+        return res.status(400).json({ message: "Arena, Email et Mot de passe sont requis" });
       }
     } else if (!nom || !prenom || !email || !password || !arenaId) {
       return res.status(400).json({ message: "Tous les champs sont requis pour un utilisateur standard" });
@@ -1635,8 +1916,8 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await createManagedUser({
       actor,
-      firstName: normalizedRole === "admin" ? "Admin" : prenom,
-      lastName: normalizedRole === "admin" ? arenaName : nom,
+      firstName: normalizedRole === "admin" ? (String(prenom ?? "").trim() || "Admin") : prenom,
+      lastName: normalizedRole === "admin" ? (String(nom ?? "").trim() || String(arenaName ?? "").trim() || "Admin") : nom,
       email,
       passwordHash,
       arenaId: arenaId ? Number(arenaId) : null,
@@ -1672,7 +1953,7 @@ app.patch("/api/admin/users/:id/role", requireAuth, requireAdmin, async (req, re
       return res.status(401).json({ message: "User not found" });
     }
     const nextRole = String(req.body?.role ?? "").trim().toLowerCase();
-    const user = await updateMembershipRole(actor, Number(req.params.id), nextRole);
+    const user = await updateMembershipRole(actor, Number(req.params.id), nextRole, req.body?.arenaId ? Number(req.body.arenaId) : null);
     await createNotification({
       userId: user.id,
       title: "Role updated",
@@ -2030,10 +2311,18 @@ app.get("/api/admin/scoring", requireAuth, requireAdmin, async (req, res) => {
   try {
     const actor = await attachActor(req);
     if (!actor) return res.status(401).json({ message: "User not found" });
-    const [matches, recentActivity] = await Promise.all([
-      listScoringMatches(actor, 50),
-      getRecentScoreActivity(10),
-    ]);
+    let matches = [];
+    try {
+      matches = await listScoringMatches(actor, 50);
+    } catch (error) {
+      console.warn("[admin/scoring] scoring matches unavailable:", error?.message ?? error);
+    }
+    let recentActivity = [];
+    try {
+      recentActivity = await getRecentScoreActivity(10);
+    } catch (error) {
+      console.warn("[admin/scoring] recent score activity unavailable:", error?.message ?? error);
+    }
     res.json({ matches, recentActivity });
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load scoring data" });
@@ -2115,6 +2404,823 @@ app.get("/api/smartplay/status", async (_req, res) => {
     res.json(status);
   } catch {
     res.json({ connected: false, message: "Unable to check AI service status." });
+  }
+});
+
+const smartplayUploadTempDir = path.join(uploadsDir, "smartplay", "_tmp");
+fs.mkdirSync(smartplayUploadTempDir, { recursive: true });
+
+const uploadSmartPlayClip = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, smartplayUploadTempDir),
+    filename: (_req, file, cb) => {
+      const safeName = String(file.originalname ?? "clip.mp4").replace(/[^a-zA-Z0-9._-]/g, "-");
+      cb(null, `${Date.now()}-${randomUUID()}-${safeName}`);
+    },
+  }),
+  limits: {
+    fileSize: SMARTPLAY_CLIP_UPLOAD_MB * 1024 * 1024,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (String(file.mimetype ?? "").startsWith("video/")) {
+      cb(null, true);
+    } else {
+      cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", "Only video uploads are allowed"));
+    }
+  },
+});
+
+app.post("/api/smartplay/clips/upload", requireAuth, requireAdmin, uploadSmartPlayClip.array("clips", 6), async (req, res) => {
+  const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+  if (!uploadedFiles.length) return res.status(400).json({ message: "No video clips uploaded." });
+
+  const actor = await attachActor(req);
+  if (!actor) return res.status(401).json({ message: "User not found" });
+
+  const matchIdRaw = String(req.body?.match_id ?? "").trim();
+  const cameraId = safePathSegment(req.body?.camera_id ?? "camera_01", "camera_01");
+  const sportType = String(req.body?.sport_type ?? "padel").trim().toLowerCase() || "padel";
+  const numericMatchId = /^\d+$/.test(matchIdRaw) ? Number(matchIdRaw) : null;
+  const externalMatchKey = numericMatchId ? null : (matchIdRaw || null);
+  const courtId = req.body?.court_id ? Number(req.body.court_id) : null;
+
+  // Parse assigned_player_ids (JSON array string from FormData)
+  let assignedPlayerIds = [];
+  try {
+    const rawIds = req.body?.assigned_player_ids;
+    if (typeof rawIds === "string" && rawIds.trim().startsWith("[")) {
+      assignedPlayerIds = JSON.parse(rawIds).map(Number).filter(Number.isFinite);
+    } else if (Array.isArray(rawIds)) {
+      assignedPlayerIds = rawIds.map(Number).filter(Number.isFinite);
+    }
+  } catch { /* ignore parse errors */ }
+
+  // primary player: explicit field or first from assigned list
+  const playerUserId = Number(req.body?.player_user_id ?? assignedPlayerIds[0] ?? 0);
+
+  if (!playerUserId && !assignedPlayerIds.length) {
+    return res.status(400).json({ message: "At least one player must be assigned." });
+  }
+
+  const clips = [];
+  try {
+    for (const file of uploadedFiles) {
+      const tempClip = await createAiUploadedClip({
+        matchId: numericMatchId,
+        externalMatchKey,
+        playerUserId,
+        uploadedByUserId: actor.id,
+        cameraId,
+        sportType,
+        originalFilename: file.originalname,
+        storedVideoPath: file.path,
+        status: "awaiting_court_annotation",
+        courtId,
+        assignedPlayerIds,
+      });
+      const finalDir = path.join(
+        uploadsDir,
+        "smartplay",
+        "matches",
+        safePathSegment(matchIdRaw || tempClip.id, "match"),
+        "players",
+        safePathSegment(playerUserId, "player"),
+        `clip_${tempClip.id}`
+      );
+      await fs.promises.mkdir(finalDir, { recursive: true });
+      const finalPath = path.join(finalDir, `original${path.extname(file.originalname || "") || ".mp4"}`);
+      await fs.promises.rename(file.path, finalPath);
+      const storedVideoPath = path.relative(process.cwd(), finalPath).replace(/\\/g, "/");
+      const previewPath = smartplayClipPreviewPath(storedVideoPath);
+      const previewResult = await createBrowserPreviewVideo(path.resolve(storedVideoPath), path.resolve(previewPath));
+      if (!previewResult.created && previewResult.reason !== "disabled") {
+        console.warn(`[smartplay/upload] browser preview was not generated for clip ${tempClip.id}: ${previewResult.reason}`);
+      }
+      const clip = await updateAiUploadedClipStorage(tempClip.id, storedVideoPath);
+      // If this clip has a court_id with an active calibration, auto-resolve homography
+      let autoHomographyPath = null;
+      if (courtId) {
+        const calib = await getActiveCalibrationForCourt(courtId);
+        if (calib?.homography_matrix) {
+          const homographyDir = path.join(uploadsDir, "homography");
+          await fs.promises.mkdir(homographyDir, { recursive: true });
+          // Write as .json — ball detector, finalize, and viz render all accept JSON
+          const jsonPath = path.join(homographyDir, `court_${courtId}.json`);
+          fs.writeFileSync(jsonPath, JSON.stringify({ homography_matrix: calib.homography_matrix }));
+          autoHomographyPath = jsonPath;
+        }
+      }
+
+      const jobStatus = autoHomographyPath ? "court_annotation_done" : "awaiting_court_annotation";
+      if (autoHomographyPath) {
+        await updateAiUploadedClipStatus(clip.id, "court_annotation_done");
+      }
+      await createOrUpdateAiClipJob({
+        clipId: clip.id,
+        status: jobStatus,
+        currentStep: "court_annotation",
+        inputVideoPath: storedVideoPath,
+        homographyPath: autoHomographyPath,
+      });
+      clips.push(smartplayClipPayload(clip));
+    }
+    return res.status(201).json({ clips });
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to upload SmartPlay clips." });
+  }
+});
+
+app.use("/api/smartplay/clips/upload", (error, _req, res, next) => {
+  if (!error) return next();
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({
+        message: `SmartPlay clip is too large. Current limit is ${SMARTPLAY_CLIP_UPLOAD_MB} MB. Increase SMARTPLAY_CLIP_UPLOAD_MB in .env if needed.`,
+      });
+    }
+    return res.status(400).json({ message: error.message });
+  }
+  return next(error);
+});
+
+app.get("/api/smartplay/clips", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const clips = await listAiUploadedClips({
+      matchId: req.query.match_id ? Number(req.query.match_id) : null,
+      playerUserId: req.query.player_user_id ? Number(req.query.player_user_id) : null,
+      status: req.query.status ? String(req.query.status) : null,
+    });
+    res.json({ clips: clips.map(smartplayClipPayload) });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load SmartPlay clips." });
+  }
+});
+
+app.get("/api/smartplay/clips/:clipId", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    res.json({ ...details, clip: smartplayClipPayload(details.clip) });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load SmartPlay clip." });
+  }
+});
+
+app.post("/api/smartplay/clips/:clipId/generate-preview", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+
+    const inputPath = path.resolve(details.clip.storedVideoPath);
+    if (!fs.existsSync(inputPath)) {
+      return res.status(404).json({ message: `Original video file not found: ${inputPath}` });
+    }
+
+    const previewPath = smartplayClipPreviewPath(details.clip.storedVideoPath);
+    const previewResult = await createBrowserPreviewVideo(inputPath, path.resolve(previewPath));
+    if (!previewResult.created) {
+      return res.status(503).json({
+        message: previewResult.reason === "ffmpeg_not_found"
+          ? "ffmpeg is not installed or FFMPEG_PATH is not pointing to ffmpeg."
+          : "Unable to generate browser preview.",
+        detail: previewResult.reason,
+      });
+    }
+
+    res.json({ clip: smartplayClipPayload(details.clip) });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to generate browser preview." });
+  }
+});
+
+app.post("/api/smartplay/clips/:clipId/start-court-annotation", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    const outputJsonl = path.resolve(path.join(path.dirname(details.clip.storedVideoPath), "court_keypoints.jsonl"));
+    await updateAiUploadedClipStatus(details.clip.id, "awaiting_court_annotation");
+    await createOrUpdateAiClipJob({
+      clipId: details.clip.id,
+      status: "awaiting_court_annotation",
+      currentStep: "court_annotation",
+      inputVideoPath: details.clip.storedVideoPath,
+    });
+    res.json({
+      status: "awaiting_court_annotation",
+      videoPath: path.resolve(details.clip.storedVideoPath),
+      suggestedOutputJsonl: outputJsonl,
+      command: smartplayAnnotationCommand(details.clip, outputJsonl),
+      note: "Run the annotation command locally, export/prepare homography, then confirm the homography path.",
+    });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to start annotation workflow." });
+  }
+});
+
+app.post("/api/smartplay/clips/:clipId/confirm-homography", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    const homographyPath = String(req.body?.homography_path ?? "").trim();
+    if (!homographyPath) return res.status(400).json({ message: "homography_path is required." });
+    const resolved = path.isAbsolute(homographyPath) ? homographyPath : path.resolve(homographyPath);
+    if (!fs.existsSync(resolved)) return res.status(400).json({ message: `Homography file not found: ${resolved}` });
+    if (!fs.statSync(resolved).isFile()) return res.status(400).json({ message: `Homography path must point to a file, not a folder: ${resolved}` });
+    if (!isSupportedHomographyFile(resolved)) return res.status(400).json({ message: "Homography file must be .json, .npy, or .npz." });
+    const clip = await updateAiUploadedClipStatus(details.clip.id, "court_annotation_done");
+    const job = await createOrUpdateAiClipJob({
+      clipId: details.clip.id,
+      status: "court_annotation_done",
+      currentStep: "court_annotation",
+      inputVideoPath: details.clip.storedVideoPath,
+      homographyPath: resolved,
+      courtSurfacesPath: req.body?.court_surfaces_path ? String(req.body.court_surfaces_path) : null,
+    });
+    res.json({ clip, job });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to confirm homography." });
+  }
+});
+
+app.post("/api/smartplay/clips/:clipId/process", requireAuth, requireAdmin, async (req, res) => {
+  if (!SMARTPLAY_AI_URL) return sendSmartPlayNotConfigured(res);
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    if (!details.job?.homographyPath) return res.status(400).json({ message: "Confirm homography before processing this clip." });
+    const homographyPath = path.resolve(details.job.homographyPath);
+    if (!fs.existsSync(homographyPath)) return res.status(400).json({ message: `Homography file not found: ${homographyPath}` });
+    if (!fs.statSync(homographyPath).isFile()) return res.status(400).json({ message: `Homography path must point to a file, not a folder: ${homographyPath}` });
+    if (!isSupportedHomographyFile(homographyPath)) return res.status(400).json({ message: "Homography file must be .json, .npy, or .npz." });
+
+    const outputRoot = path.resolve("..", "smartplay_ai", "data", "processed", "smartplay_clips", `match_${details.clip.matchId ?? details.clip.externalMatchKey ?? "demo"}`, `player_${details.clip.playerUserId}`, `clip_${details.clip.id}`);
+    const payload = {
+      clip_id: String(details.clip.id),
+      match_id: String(details.clip.externalMatchKey ?? details.clip.matchId ?? `clip_${details.clip.id}`),
+      player_user_id: String(details.clip.playerUserId),
+      camera_id: details.clip.cameraId,
+      video_path: path.resolve(details.clip.storedVideoPath),
+      homography_path: homographyPath,
+      output_root: outputRoot,
+      sport_type: String(details.clip.sportType ?? "padel"),
+      render_debug: Boolean(req.body?.render_debug ?? true),
+      max_frames: req.body?.max_frames ?? null,
+    };
+    let response;
+    let body;
+    try {
+      const result = await callSmartPlayJson("/jobs/clip-full-pipeline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      response = result.response;
+      body = result.body;
+    } catch (error) {
+      return sendSmartPlayFetchError(res, error);
+    }
+    if (!response.ok) return res.status(response.status).json(body ?? {});
+    const job = await createOrUpdateAiClipJob({
+      clipId: details.clip.id,
+      externalJobId: body?.job_id ?? null,
+      status: body?.status ?? "queued",
+      currentStep: body?.current_step ?? "upload",
+      aiServiceUrl: SMARTPLAY_AI_URL,
+      inputVideoPath: details.clip.storedVideoPath,
+      homographyPath: details.job.homographyPath,
+      scoringOutDir: `${outputRoot.replace(/\\/g, "/")}/scoring_v2`,
+      renderedVideoPath: `${outputRoot.replace(/\\/g, "/")}/rendered/scoring_v2_debug_with_frame_counter.mp4`,
+    });
+    await updateAiUploadedClipStatus(details.clip.id, "processing");
+    res.status(response.status).json({ ...body, job });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to start clip processing." });
+  }
+});
+
+app.get("/api/smartplay/clips/:clipId/job", requireAuth, requireAdmin, async (req, res) => {
+  let details = null;
+  try {
+    details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    if (!details.job?.externalJobId || !SMARTPLAY_AI_URL) return res.json({ job: details.job });
+    let response;
+    let body;
+    try {
+      const result = await callSmartPlayJson(`/jobs/${encodeURIComponent(details.job.externalJobId)}`);
+      response = result.response;
+      body = result.body;
+    } catch (error) {
+      return res.json({
+        job: details.job,
+        aiServiceAvailable: false,
+        warning: error instanceof Error ? error.message : "SmartPlay AI service is unavailable.",
+      });
+    }
+    if (!response.ok) {
+      return res.json({
+        job: details.job,
+        aiServiceAvailable: true,
+        warning: body?.message ?? body?.detail ?? `SmartPlay AI returned ${response.status}.`,
+      });
+    }
+    const outputPaths = body?.output_paths ?? {};
+    const job = await createOrUpdateAiClipJob({
+      clipId: details.clip.id,
+      externalJobId: body?.job_id ?? details.job.externalJobId,
+      status: body?.status ?? details.job.status,
+      currentStep: body?.current_step ?? details.job.currentStep,
+      errorMessage: body?.error_message ?? null,
+      startedAt: body?.started_at ?? null,
+      finishedAt: body?.finished_at ?? null,
+      ballTracksPath: outputPaths.ball_track_parquet ?? null,
+      playerTracksPath: outputPaths.player_tracks_parquet ?? null,
+      scoringOutDir: outputPaths.scoring_out_dir ?? null,
+      renderedVideoPath: outputPaths.rendered_video_path ?? null,
+    });
+    if (body?.status === "done") {
+      await updateAiUploadedClipStatus(details.clip.id, "done");
+      try {
+        const eventsResponse = await callSmartPlayJson(`/clips/${details.clip.id}/events`);
+        if (eventsResponse.response.ok && Array.isArray(eventsResponse.body?.events)) {
+          await saveAiClipEvents({ clipId: details.clip.id, externalJobId: body.job_id, events: eventsResponse.body.events });
+        }
+      } catch (error) {
+        console.warn("[smartplay/clip-job] unable to persist clip events:", error?.message ?? error);
+      }
+    } else if (body?.status === "failed") {
+      await updateAiUploadedClipStatus(details.clip.id, "failed");
+    }
+    res.json({ ...body, job });
+  } catch (error) {
+    console.warn("[smartplay/clip-job] returning stored job after refresh error:", error?.message ?? error);
+    res.json({
+      job: details?.job ?? null,
+      aiServiceAvailable: false,
+      warning: error instanceof Error ? error.message : "Unable to refresh SmartPlay job.",
+    });
+  }
+});
+
+app.post("/api/smartplay/clips/:clipId/cancel", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    if (!details.job?.externalJobId) {
+      await updateAiUploadedClipStatus(details.clip.id, "canceled");
+      const job = await createOrUpdateAiClipJob({
+        clipId: details.clip.id,
+        status: "canceled",
+        currentStep: "canceled",
+        errorMessage: "Canceled before SmartPlay AI job started",
+        finishedAt: new Date().toISOString(),
+      });
+      return res.json({ job, canceled: true });
+    }
+
+    if (SMARTPLAY_AI_URL) {
+      try {
+        const { response, body } = await callSmartPlayJson(`/jobs/${encodeURIComponent(details.job.externalJobId)}/cancel`, {
+          method: "POST",
+        });
+        if (!response.ok) {
+          // 404/410 means the job is already gone on the AI side — treat as success and cancel locally
+          if (response.status === 404 || response.status === 410) {
+            console.info(`[smartplay/cancel] AI job ${details.job.externalJobId} not found (${response.status}); marking canceled locally.`);
+          } else {
+            return res.status(response.status).json(body ?? { message: "Unable to cancel SmartPlay AI job." });
+          }
+        }
+      } catch (error) {
+        console.warn("[smartplay/cancel] AI service cancel failed; marking local job canceled:", error?.message ?? error);
+      }
+    }
+
+    await updateAiUploadedClipStatus(details.clip.id, "canceled");
+    const job = await createOrUpdateAiClipJob({
+      clipId: details.clip.id,
+      externalJobId: details.job.externalJobId,
+      status: "canceled",
+      currentStep: "canceled",
+      errorMessage: "Job canceled",
+      finishedAt: new Date().toISOString(),
+    });
+    res.json({ job, canceled: true });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to cancel SmartPlay job." });
+  }
+});
+
+app.get("/api/smartplay/clips/:clipId/events", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    if (details.events.length) return res.json({ clipId: details.clip.id, source: "postgres", events: details.events });
+    if (details.job?.externalJobId && SMARTPLAY_AI_URL) {
+      const { response, body } = await callSmartPlayJson(`/clips/${details.clip.id}/events`);
+      if (response.ok && Array.isArray(body?.events)) {
+        await saveAiClipEvents({ clipId: details.clip.id, externalJobId: details.job.externalJobId, events: body.events });
+      }
+      return res.status(response.status).json(body ?? {});
+    }
+    return res.json({ clipId: details.clip.id, events: [] });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load clip events." });
+  }
+});
+
+app.get("/api/smartplay/clips/:clipId/rendered-video", requireAuth, requireAdmin, async (req, res) => {
+  const details = await getAiClipDetails(req.params.clipId);
+  if (!details) return res.status(404).json({ message: "Clip not found." });
+  if (details.job?.renderedVideoPath && fs.existsSync(path.resolve(details.job.renderedVideoPath))) {
+    return sendLocalVideoFile(res, details.job.renderedVideoPath, "Rendered SmartPlay clip not available.");
+  }
+  if (!details.job?.externalJobId) {
+    return res.status(404).json({ message: "Rendered video is not available yet. Start processing and wait for the job to finish." });
+  }
+  return proxySmartPlayVideo(res, `/clips/${encodeURIComponent(req.params.clipId)}/rendered-video`, "Rendered SmartPlay clip not available.");
+});
+
+// ── Delete clip (soft delete) ────────────────────────────────────────────────
+app.delete("/api/smartplay/clips/:clipId", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    await deleteAiUploadedClip(details.clip.id);
+    res.json({ deleted: true });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to delete clip." });
+  }
+});
+
+app.post("/api/smartplay/clips/:clipId/share-with-players", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details) return res.status(404).json({ message: "Clip not found." });
+    if (details.clip.status !== "done") return res.status(400).json({ message: "Clip must be fully processed before sharing." });
+    const result = await shareClipWithPlayers(details.clip.id, req.user.sub, { createNotification });
+    res.json({ ...result, message: `Shared with ${result.shared} player(s).` });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to share clip." });
+  }
+});
+
+app.get("/api/smartplay/my-clips", requireAuth, async (req, res) => {
+  try {
+    const clips = await listMySmartPlayClips(req.user.sub);
+    res.json({ clips });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load your clips." });
+  }
+});
+
+app.get("/api/smartplay/my-clips/:clipId/rendered-video", requireAuth, async (req, res) => {
+  try {
+    const details = await getAiClipDetails(req.params.clipId);
+    if (!details?.clip) return res.status(404).json({ message: "Clip not found." });
+    const assignedIds = Array.isArray(details.clip.assignedPlayerIds) ? details.clip.assignedPlayerIds.map(Number) : [];
+    if (details.clip.playerUserId !== Number(req.user.sub) && !assignedIds.includes(Number(req.user.sub))) {
+      return res.status(403).json({ message: "Not authorized." });
+    }
+    const videoPath = details.job?.renderedVideoPath;
+    if (!videoPath) return res.status(404).json({ message: "Rendered video not available yet." });
+    return sendLocalVideoFile(res, videoPath, "Rendered video file not found on server.");
+  } catch (error) {
+    return res.status(500).json({ message: error instanceof Error ? error.message : "Unable to load video." });
+  }
+});
+
+// ── Court calibration frame upload middleware ────────────────────────────────
+const calibrationFrameDir = path.join(uploadsDir, "calibration_frames");
+fs.mkdirSync(calibrationFrameDir, { recursive: true });
+
+const uploadCalibrationFrame = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, calibrationFrameDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || ".jpg").toLowerCase() || ".jpg";
+      cb(null, `frame_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /image\/(jpeg|png|webp|bmp)/.test(file.mimetype);
+    cb(ok ? null : new Error("Only image files are allowed for calibration frames."), ok);
+  },
+});
+
+// ── Court calibrations API ───────────────────────────────────────────────────
+
+app.get("/api/admin/courts-with-calibrations", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    const email = req.user?.email;
+    // Resolve arena_id via PostgreSQL arena_memberships (arena admins)
+    const { rows: memberRows } = await pgPool.query(
+      `SELECT am.arena_id FROM arena_memberships am
+       JOIN users u ON u.id = am.user_id
+       WHERE u.email = $1 AND am.status = 'active'
+       LIMIT 1`,
+      [email]
+    );
+    const arenaId = memberRows[0]?.arena_id ?? null;
+    const courts = await listCourtsWithCalibrations(arenaId);
+    res.json({ courts });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load courts." });
+  }
+});
+
+app.get("/api/admin/court-calibrations/:courtId", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const calibrations = await listCourtCalibrations(req.params.courtId);
+    res.json({ calibrations });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load calibrations." });
+  }
+});
+
+app.post("/api/admin/court-calibrations/:courtId", requireAuth, requireAdmin, uploadCalibrationFrame.single("frame"), async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    const courtId = Number(req.params.courtId);
+    const sportType = String(req.body?.sport_type ?? "padel").trim().toLowerCase() || "padel";
+    // Resolve arena_id from PostgreSQL arena_memberships
+    let arenaId = null;
+    if (req.user?.email) {
+      const { default: pgPool } = await import("./pg-pool.mjs");
+      const { rows: m } = await pgPool.query(
+        `SELECT am.arena_id FROM arena_memberships am JOIN users u ON u.id = am.user_id
+         WHERE u.email = $1 AND am.status = 'active' LIMIT 1`,
+        [req.user.email]
+      );
+      arenaId = m[0]?.arena_id ?? null;
+      if (!arenaId) {
+        // Derive from court's own arena
+        const { rows: cr } = await pgPool.query("SELECT arena_id FROM courts WHERE id = $1", [courtId]);
+        arenaId = cr[0]?.arena_id ?? null;
+      }
+    }
+    let imagePath = null;
+    if (req.file) {
+      imagePath = path.relative(process.cwd(), req.file.path).replace(/\\/g, "/");
+    }
+    const calib = await createCourtCalibration({
+      courtId,
+      arenaId,
+      sportType,
+      calibrationImagePath: imagePath,
+      createdByUserId: actor?.id ?? null,
+    });
+    res.status(201).json({ calibration: calib });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to create calibration." });
+  }
+});
+
+app.patch("/api/admin/court-calibrations/:calibId/keypoints", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { image_points, world_points, keypoint_labels } = req.body ?? {};
+    if (!Array.isArray(image_points) || !Array.isArray(world_points)) {
+      return res.status(400).json({ message: "image_points and world_points are required arrays." });
+    }
+    if (image_points.length < 4 || image_points.length !== world_points.length) {
+      return res.status(400).json({ message: "Need at least 4 matching point pairs." });
+    }
+
+    // Compute homography via Python DLT helper
+    let homographyMatrix = null;
+    const helperPath = path.join(process.cwd(), "server", "helpers", "compute_homography.py");
+    if (fs.existsSync(helperPath)) {
+      const pyInput = JSON.stringify({ image_points, world_points });
+      // Try env-specified executable first, then fall back to common names
+      const pyExecs = [
+        process.env.PYTHON_EXECUTABLE,
+        "python3",
+        "python",
+      ].filter(Boolean);
+      let result = null;
+      for (const pyExec of pyExecs) {
+        result = spawnSync(pyExec, [helperPath], { input: pyInput, encoding: "utf8", timeout: 15000 });
+        if (result.status === 0 || (result.stderr && !result.stderr.includes("not found") && !result.stderr.includes("introuvable"))) break;
+      }
+      if (result && result.status === 0 && result.stdout) {
+        const parsed = JSON.parse(result.stdout.trim());
+        if (parsed.homography_matrix) homographyMatrix = parsed.homography_matrix;
+        else console.warn("[court-calibration] homography computation error:", parsed.error);
+      } else {
+        console.warn("[court-calibration] python helper failed:", result?.stderr);
+      }
+    }
+
+    const calib = await saveCalibrationKeypoints({
+      calibId: req.params.calibId,
+      imagePoints: image_points,
+      worldPoints: world_points,
+      keypointLabels: keypoint_labels ?? [],
+      homographyMatrix,
+    });
+    res.json({ calibration: calib, homography_computed: !!homographyMatrix });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to save keypoints." });
+  }
+});
+
+app.post("/api/admin/court-calibrations/:calibId/activate", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const calib = await getCourtCalibration(req.params.calibId);
+    if (!calib) return res.status(404).json({ message: "Calibration not found." });
+    if (!calib.homography_matrix) return res.status(400).json({ message: "Homography not yet computed. Save keypoints first." });
+    const activated = await activateCourtCalibration(calib.id, calib.court_id);
+    res.json({ calibration: activated });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to activate calibration." });
+  }
+});
+
+app.delete("/api/admin/court-calibrations/:calibId", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await deleteCourtCalibration(req.params.calibId);
+    res.json({ deleted: true });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to delete calibration." });
+  }
+});
+
+// Serve calibration frame images
+app.get("/api/admin/calibration-frame/:filename", requireAuth, requireAdmin, (req, res) => {
+  const safeName = path.basename(req.params.filename);
+  const filePath = path.join(calibrationFrameDir, safeName);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ message: "Frame not found." });
+  res.sendFile(filePath, { root: process.cwd() });
+});
+
+app.post("/api/smartplay/matches/:matchId/scoring/start", requireAuthUnlessLocal, async (req, res) => {
+  if (!SMARTPLAY_AI_URL) {
+    return sendSmartPlayNotConfigured(res);
+  }
+
+  const matchConfig = getSmartPlayMatchConfig(req.params.matchId);
+  if (!matchConfig) {
+    return res.status(404).json({
+      message: `No SmartPlay AI v1 path mapping exists for match "${req.params.matchId}".`,
+    });
+  }
+
+  const payload = toScoringV2Payload(matchConfig, req.body);
+
+  try {
+    const { response, body } = await callSmartPlayJson("/jobs/scoring-v2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      return res.status(response.status).json(body ?? {});
+    }
+
+    let persistedJob = null;
+    if (body?.job_id) {
+      const actor = await attachActor(req);
+      persistedJob = await createAiAnalysisJobRecord({
+        matchId: null,
+        externalMatchKey: matchConfig.match_id,
+        cameraId: matchConfig.camera_id,
+        requestedByUserId: actor?.id ?? req.user?.sub ?? null,
+        jobId: body.job_id,
+        status: body.status ?? "queued",
+        aiServiceUrl: SMARTPLAY_AI_URL,
+        inputVideoPath: matchConfig.input_video_path,
+        ballTracksPath: matchConfig.ball_tracks,
+        playerTracksPath: matchConfig.player_tracks,
+        outputDir: matchConfig.out_dir,
+        debugVideoPath: matchConfig.debug_video_path,
+      });
+    }
+
+    return res.status(response.status).json({
+      ...body,
+      persisted: Boolean(persistedJob),
+      analysis_job_id: persistedJob?.id ?? null,
+    });
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
+  }
+});
+
+app.get("/api/smartplay/jobs/:jobId", requireAuthUnlessLocal, async (req, res) => {
+  if (!SMARTPLAY_AI_URL) {
+    return sendSmartPlayNotConfigured(res);
+  }
+
+  try {
+    const { response, body } = await callSmartPlayJson(`/jobs/${encodeURIComponent(req.params.jobId)}`);
+    if (body?.job_id) {
+      await updateAiAnalysisJobFromService(body.job_id, body);
+      if (body.status === "done") {
+        try {
+          const saved = await persistAiEventsForServiceJob(body);
+          return res.status(response.status).json({ ...body, persisted_events: saved.saved ?? 0 });
+        } catch (error) {
+          return res.status(response.status).json({
+            ...body,
+            persisted_events: 0,
+            persistence_warning: error instanceof Error ? error.message : "Unable to persist SmartPlay events.",
+          });
+        }
+      }
+    }
+    return res.status(response.status).json(body ?? {});
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
+  }
+});
+
+app.get("/api/smartplay/matches/:matchId/events", optionalAuth, async (req, res) => {
+  const matchConfig = getSmartPlayMatchConfig(req.params.matchId);
+  if (!matchConfig) {
+    return res.status(404).json({
+      message: `No SmartPlay AI v1 path mapping exists for match "${req.params.matchId}".`,
+    });
+  }
+
+  try {
+    const storedEvents = await listAiScoringEventsForMatch(matchConfig.match_id, matchConfig.camera_id);
+    if (storedEvents.length) {
+      return res.json({
+        match_id: matchConfig.match_id,
+        camera_id: matchConfig.camera_id,
+        source: "postgres",
+        events: storedEvents,
+      });
+    }
+  } catch (error) {
+    console.warn("[smartplay/events] unable to read persisted events:", error?.message ?? error);
+  }
+
+  if (!SMARTPLAY_AI_URL) {
+    return sendSmartPlayNotConfigured(res);
+  }
+
+  try {
+    const { response, body } = await callSmartPlayJson(
+      `/matches/${encodeURIComponent(matchConfig.match_id)}/${encodeURIComponent(matchConfig.camera_id)}/events`
+    );
+    if (response.ok) {
+      const latestJob = await getLatestAiAnalysisJobForMatch(matchConfig.match_id, matchConfig.camera_id);
+      if (latestJob?.job_id && Array.isArray(body?.events)) {
+        try {
+          await saveAiScoringEventsForJob({ jobId: latestJob.job_id, events: body.events });
+          return res.status(response.status).json({ ...body, source: "fastapi", persisted_events: body.events.length });
+        } catch (error) {
+          return res.status(response.status).json({
+            ...body,
+            source: "fastapi",
+            persisted_events: 0,
+            persistence_warning: error instanceof Error ? error.message : "Unable to persist SmartPlay events.",
+          });
+        }
+      }
+    }
+    return res.status(response.status).json(body ?? {});
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
+  }
+});
+
+app.get("/api/smartplay/matches/:matchId/debug-video", optionalAuth, async (req, res) => {
+  if (!SMARTPLAY_AI_URL) {
+    return sendSmartPlayNotConfigured(res);
+  }
+
+  const matchConfig = getSmartPlayMatchConfig(req.params.matchId);
+  if (!matchConfig) {
+    return res.status(404).json({
+      message: `No SmartPlay AI v1 path mapping exists for match "${req.params.matchId}".`,
+    });
+  }
+
+  try {
+    const response = await fetchSmartPlay(
+      `/matches/${encodeURIComponent(matchConfig.match_id)}/${encodeURIComponent(matchConfig.camera_id)}/debug-video`
+    );
+    if (!response.ok) {
+      const body = await readSmartPlayResponse(response);
+      return res.status(response.status).json(body ?? { message: "Debug video not available." });
+    }
+    if (!response.body) {
+      return res.status(502).json({ message: "SmartPlay AI returned an empty debug video response." });
+    }
+
+    const contentType = response.headers.get("content-type");
+    const contentLength = response.headers.get("content-length");
+    if (contentType) res.setHeader("content-type", contentType);
+    if (contentLength) res.setHeader("content-length", contentLength);
+    res.setHeader("content-disposition", `inline; filename="smartplay-${matchConfig.match_id}-${matchConfig.camera_id}.mp4"`);
+    res.status(response.status);
+    return Readable.fromWeb(response.body).pipe(res);
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
   }
 });
 

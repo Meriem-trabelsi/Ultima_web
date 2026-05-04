@@ -20,7 +20,7 @@ const BILLING_SECRET = process.env.BILLING_SIGNATURE_SECRET ?? process.env.JWT_S
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const LOGO_CANDIDATE_PATHS = [path.resolve(__dirname, "../src/assets/ultima_logo.jpg"), path.resolve(__dirname, "../public/ultima_logo.jpg")];
-const DB_STARTUP_RETRY_ATTEMPTS = Number(process.env.DB_STARTUP_RETRY_ATTEMPTS ?? 30);
+const DB_STARTUP_RETRY_ATTEMPTS = Number(process.env.DB_STARTUP_RETRY_ATTEMPTS ?? 240);
 const DB_STARTUP_RETRY_DELAY_MS = Number(process.env.DB_STARTUP_RETRY_DELAY_MS ?? 1000);
 const mkCourt = (name, opts = {}) => ({
   name,
@@ -909,6 +909,129 @@ export async function initializeDatabase() {
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_analysis_jobs (
+      id                    SERIAL PRIMARY KEY,
+      match_id              INT NULL REFERENCES matches(id) ON DELETE CASCADE,
+      external_match_key    TEXT NULL,
+      camera_id             TEXT NOT NULL DEFAULT 'camera_01',
+      requested_by_user_id  INT NULL REFERENCES users(id) ON DELETE SET NULL,
+      job_id                TEXT NOT NULL UNIQUE,
+      status                TEXT NOT NULL DEFAULT 'queued',
+      ai_service_url        TEXT NULL,
+      input_video_path      TEXT NULL,
+      ball_tracks_path      TEXT NULL,
+      player_tracks_path    TEXT NULL,
+      output_dir            TEXT NULL,
+      debug_video_path      TEXT NULL,
+      error_message         TEXT NULL,
+      started_at            TIMESTAMPTZ NULL,
+      finished_at           TIMESTAMPTZ NULL,
+      created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_analysis_jobs_external_match ON ai_analysis_jobs(external_match_key, camera_id, created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_analysis_jobs_requested_by ON ai_analysis_jobs(requested_by_user_id, created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_analysis_jobs_status ON ai_analysis_jobs(status)");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_scoring_events (
+      id                 SERIAL PRIMARY KEY,
+      analysis_job_id    INT NULL REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+      match_id           INT NULL REFERENCES matches(id) ON DELETE CASCADE,
+      external_match_key TEXT NULL,
+      camera_id          TEXT NOT NULL DEFAULT 'camera_01',
+      frame              INT NOT NULL,
+      time_sec           NUMERIC NULL,
+      event_type         TEXT NOT NULL,
+      winner_side        TEXT NULL,
+      confidence         NUMERIC NULL,
+      reason             TEXT NULL,
+      raw                JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_scoring_events_job ON ai_scoring_events(analysis_job_id, frame)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_scoring_events_external_match ON ai_scoring_events(external_match_key, camera_id, frame)");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_performance_summaries (
+      id              SERIAL PRIMARY KEY,
+      analysis_job_id INT NULL REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+      match_id        INT NULL REFERENCES matches(id) ON DELETE CASCADE,
+      player_user_id  INT NULL REFERENCES users(id) ON DELETE SET NULL,
+      summary         JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_performance_summaries_job ON ai_performance_summaries(analysis_job_id)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_performance_summaries_player ON ai_performance_summaries(player_user_id, created_at DESC)");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_uploaded_clips (
+      id                   SERIAL PRIMARY KEY,
+      match_id             INT NULL REFERENCES matches(id) ON DELETE SET NULL,
+      external_match_key   TEXT NULL,
+      player_user_id       INT NULL REFERENCES users(id) ON DELETE SET NULL,
+      uploaded_by_user_id  INT NULL REFERENCES users(id) ON DELETE SET NULL,
+      camera_id            TEXT NOT NULL DEFAULT 'camera_01',
+      sport_type           TEXT NOT NULL DEFAULT 'padel',
+      original_filename    TEXT NOT NULL,
+      stored_video_path    TEXT NOT NULL,
+      duration_sec         NUMERIC NULL,
+      fps                  NUMERIC NULL,
+      frame_count          INT NULL,
+      width                INT NULL,
+      height               INT NULL,
+      status               TEXT NOT NULL DEFAULT 'awaiting_court_annotation',
+      created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_uploaded_clips_match ON ai_uploaded_clips(match_id, created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_uploaded_clips_external_match ON ai_uploaded_clips(external_match_key, created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_uploaded_clips_player ON ai_uploaded_clips(player_user_id, created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_uploaded_clips_status ON ai_uploaded_clips(status)");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_clip_jobs (
+      id                  SERIAL PRIMARY KEY,
+      clip_id             INT NOT NULL REFERENCES ai_uploaded_clips(id) ON DELETE CASCADE,
+      external_job_id     TEXT NULL UNIQUE,
+      job_type            TEXT NOT NULL DEFAULT 'clip_full_pipeline',
+      status              TEXT NOT NULL DEFAULT 'uploaded',
+      current_step        TEXT NOT NULL DEFAULT 'upload',
+      ai_service_url      TEXT NULL,
+      input_video_path    TEXT NULL,
+      homography_path     TEXT NULL,
+      court_surfaces_path TEXT NULL,
+      ball_tracks_path    TEXT NULL,
+      player_tracks_path  TEXT NULL,
+      scoring_out_dir     TEXT NULL,
+      rendered_video_path TEXT NULL,
+      error_message       TEXT NULL,
+      started_at          TIMESTAMPTZ NULL,
+      finished_at         TIMESTAMPTZ NULL,
+      created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_clip_jobs_clip ON ai_clip_jobs(clip_id, created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_clip_jobs_status ON ai_clip_jobs(status)");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_clip_events (
+      id          SERIAL PRIMARY KEY,
+      clip_id     INT NOT NULL REFERENCES ai_uploaded_clips(id) ON DELETE CASCADE,
+      job_id      INT NULL REFERENCES ai_clip_jobs(id) ON DELETE CASCADE,
+      frame       INT NOT NULL,
+      time_sec    NUMERIC NULL,
+      event_type  TEXT NOT NULL,
+      winner_side TEXT NULL,
+      confidence  NUMERIC NULL,
+      reason      TEXT NULL,
+      raw         JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_clip_events_clip ON ai_clip_events(clip_id, frame)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_clip_events_job ON ai_clip_events(job_id, frame)");
 
   // Training sessions (old coach system)
   await pool.query(`
@@ -1764,8 +1887,8 @@ export async function createManagedUser({
   }
 }
 
-export async function updateMembershipRole(actor, targetUserId, nextRole) {
-  if (!["player", "coach"].includes(nextRole)) throw new Error("Invalid role");
+export async function updateMembershipRole(actor, targetUserId, nextRole, nextArenaId = null) {
+  if (!["player", "coach", "admin"].includes(nextRole)) throw new Error("Invalid role");
   if (!isAdminLike(actor)) throw new Error("Admin access required");
   if (actor.id === targetUserId) throw new Error("You cannot change your own role");
 
@@ -1774,19 +1897,43 @@ export async function updateMembershipRole(actor, targetUserId, nextRole) {
     await client.query("BEGIN");
     const target = await findUserById(targetUserId, client);
     if (!target) throw new Error("User not found");
-    if (target.platform_role === "super_admin" || target.membership_role === "admin") throw new Error("Admin roles cannot be changed here");
-    if (actor.effective_role === "admin" && Number(target.arena_id) !== Number(actor.arena_id)) throw new Error("You can only manage users in your arena");
-    if (!["player", "coach"].includes(target.membership_role)) throw new Error("Only player and coach accounts can be updated here");
-    if (target.membership_role === nextRole) {
+    if (target.platform_role === "super_admin") throw new Error("Super admin roles cannot be changed here");
+
+    let resolvedArenaId = nextArenaId ? Number(nextArenaId) : Number(target.arena_id);
+    if (actor.effective_role === "super_admin") {
+      if (!resolvedArenaId) throw new Error("Arena is required");
+    } else {
+      if (Number(target.arena_id) !== Number(actor.arena_id)) throw new Error("You can only manage users in your arena");
+      if (!["player", "coach"].includes(nextRole)) throw new Error("Arena admins can only assign player or coach roles");
+      if (target.membership_role === "admin") throw new Error("Only a super admin can change admin roles");
+      resolvedArenaId = Number(actor.arena_id);
+    }
+
+    if (target.membership_role === nextRole && Number(target.arena_id) === Number(resolvedArenaId)) {
       await client.query("COMMIT");
       return target;
     }
 
-    await assertCanAddArenaMember(target.arena_id, nextRole);
+    await assertCanAddArenaMember(resolvedArenaId, nextRole);
     await client.query("UPDATE users SET role = $1 WHERE id = $2", [nextRole, targetUserId]);
-    await client.query("UPDATE arena_memberships SET role = $1 WHERE user_id = $2", [nextRole, targetUserId]);
+    const memberships = await client.query("SELECT id, arena_id FROM arena_memberships WHERE user_id = $1 ORDER BY id ASC", [targetUserId]);
+    const existingForArena = memberships.rows.find((row) => Number(row.arena_id) === Number(resolvedArenaId));
+    const keptMembership = existingForArena ?? memberships.rows[0] ?? null;
+    if (keptMembership?.id) {
+      await client.query(
+        "UPDATE arena_memberships SET arena_id = $1, role = $2, status = 'active' WHERE id = $3",
+        [resolvedArenaId, nextRole, keptMembership.id]
+      );
+      await client.query("DELETE FROM arena_memberships WHERE user_id = $1 AND id <> $2", [targetUserId, keptMembership.id]);
+    } else {
+      await client.query(
+        `INSERT INTO arena_memberships (arena_id, user_id, role, status, created_at)
+         VALUES ($1, $2, $3, 'active', NOW())`,
+        [resolvedArenaId, targetUserId, nextRole]
+      );
+    }
     await addActivityLog(client, {
-      arenaId: target.arena_id,
+      arenaId: resolvedArenaId,
       actorUserId: actor.id,
       actorName: `${actor.first_name} ${actor.last_name}`,
       action: "Role utilisateur mis a jour",
@@ -3689,6 +3836,12 @@ function normalizeCoachingRequest(row) {
     coachName: row.coach_name ?? null,
     arenaId: row.arena_id,
     arenaName: row.arena_name ?? null,
+    arenaCity: row.arena_city ?? null,
+    courtName: row.court_name ?? null,
+    courtType: row.court_type ?? null,
+    surfaceType: row.surface_type ?? null,
+    coachHeadline: row.coach_headline ?? null,
+    coachHourlyRate: row.coach_hourly_rate ? Number(row.coach_hourly_rate) : null,
     requestedDate: row.requested_date ? String(row.requested_date).slice(0, 10) : null,
     requestedStartTime: row.requested_start_time ? String(row.requested_start_time).slice(0, 5) : null,
     requestedEndTime: row.requested_end_time ? String(row.requested_end_time).slice(0, 5) : null,
@@ -4083,11 +4236,16 @@ export async function listCoachingRequestsForCoach(coachUserId) {
 export async function listCoachingRequestsForPlayer(playerUserId) {
   const { rows } = await pool.query(
     `SELECT cr.*, CONCAT(p.first_name,' ',p.last_name) AS player_name,
-       CONCAT(c.first_name,' ',c.last_name) AS coach_name, a.name AS arena_name
+       CONCAT(c.first_name,' ',c.last_name) AS coach_name,
+       a.name AS arena_name, a.city AS arena_city,
+       court.name AS court_name, court.court_type, court.surface_type,
+       cp.headline AS coach_headline, cp.hourly_rate AS coach_hourly_rate
      FROM coaching_requests cr
      JOIN users p ON p.id = cr.player_user_id
      JOIN users c ON c.id = cr.coach_user_id
      LEFT JOIN arenas a ON a.id = cr.arena_id
+     LEFT JOIN courts court ON court.id = cr.preferred_court_id
+     LEFT JOIN coach_profiles cp ON cp.user_id = cr.coach_user_id
      WHERE cr.player_user_id = $1 ORDER BY cr.created_at DESC`,
     [Number(playerUserId)]
   );

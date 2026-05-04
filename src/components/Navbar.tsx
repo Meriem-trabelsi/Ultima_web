@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Menu, X, Sun, Moon, UserCircle2, LogOut, Bell, ChevronDown } from "lucide-react";
+import { Menu, X, Sun, Moon, UserCircle2, LogOut, Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/hooks/use-theme";
 import { clearSession, getSessionUser, SessionUser } from "@/lib/session";
@@ -13,7 +13,6 @@ const coreLinks = [
   { key: "nav.home", path: "/" },
   { key: "nav.reservation", path: "/reservation" },
   { key: "nav.competitions", path: "/competitions" },
-  { key: "nav.live", path: "/live-scores" },
   { key: "nav.performance", path: "/performance" },
 ];
 
