@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { getSessionUser } from "@/lib/session";
 import SmartPlayClipAnalysisPanel from "@/components/smartplay/SmartPlayClipAnalysisPanel";
 import CourtCalibrationPanel from "@/components/smartplay/CourtCalibrationPanel";
+import AdminCourtLivePanel from "@/components/smartplay/AdminCourtLivePanel";
 import {
   Users, MapPin, Trophy, Activity, BarChart3, Shield, Settings,
   CreditCard, CheckCircle2, Clock,
@@ -723,6 +724,7 @@ const Admin = () => {
               <h2 className="text-2xl font-display font-bold flex items-center gap-3">
                 <Layers size={24} className="text-primary" /> Video Analysis
               </h2>
+              <AdminCourtLivePanel courts={overview?.courts ?? []} />
               <CourtCalibrationPanel />
               <SmartPlayClipAnalysisPanel users={overview?.users ?? []} />
               {/* VAR Scoring Coming Soon */}

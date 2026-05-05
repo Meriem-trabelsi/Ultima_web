@@ -583,10 +583,15 @@ export async function saveAiClipEvents({ clipId, externalJobId = null, events = 
 /** List analysis jobs for a user */
 export async function listAnalysisJobs(userId, limit = 20) {
   const result = await pool.query(
-    `SELECT sj.*, m.player1_name, m.player2_name, m.scheduled_at AS match_date,
+    `SELECT sj.*,
+            CONCAT(p1.first_name, ' ', p1.last_name) AS player1_name,
+            CONCAT(p2.first_name, ' ', p2.last_name) AS player2_name,
+            m.scheduled_at AS match_date,
             u.first_name AS requested_by_first, u.last_name AS requested_by_last
      FROM smartplay_analysis_jobs sj
      LEFT JOIN matches m ON m.id = sj.match_id
+     LEFT JOIN users p1 ON p1.id = COALESCE(m.player1_id, m.team1_player1_id)
+     LEFT JOIN users p2 ON p2.id = COALESCE(m.player2_id, m.team2_player1_id)
      LEFT JOIN users u ON u.id = sj.requested_by_user_id
      WHERE sj.user_id = $1
      ORDER BY sj.created_at DESC

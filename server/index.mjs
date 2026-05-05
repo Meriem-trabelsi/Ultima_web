@@ -160,6 +160,25 @@ import {
   activateCourtCalibration,
   deleteCourtCalibration,
 } from "./smartplay.mjs";
+import {
+  canManageLiveSession,
+  canViewLiveSession,
+  createCourtCamera,
+  createLiveSession,
+  createSystemLiveSessionForReservation,
+  getActiveCourtCamera,
+  getCourtLiveCalibration,
+  getLatestLiveUpdate,
+  getLiveSessionById,
+  listCourtCameras,
+  listLiveSessions,
+  listLiveSessionsNeedingStop,
+  listReservationLivePlayers,
+  listReservationsNeedingLiveStart,
+  recordLiveUpdate,
+  saveCourtLiveCalibration,
+  updateLiveSessionStatus,
+} from "./live-sessions.mjs";
 
 const app = express();
 const httpServer = createServer(app);
@@ -194,6 +213,7 @@ const LAN_IP = (() => {
 })();
 // Public base URL for QR codes — set PUBLIC_SERVER_URL in .env when using a tunnel (ngrok/cloudflared)
 const PUBLIC_SERVER_URL = String(process.env.PUBLIC_SERVER_URL ?? "").trim() || `http://${LAN_IP}:${PORT}`;
+const SMARTPLAY_CALLBACK_BASE_URL = String(process.env.SMARTPLAY_CALLBACK_BASE_URL ?? process.env.API_URL ?? PUBLIC_SERVER_URL).trim().replace(/\/+$/, "");
 httpServer.requestTimeout = LONG_UPLOAD_REQUEST_TIMEOUT_MS;
 httpServer.timeout = LONG_UPLOAD_REQUEST_TIMEOUT_MS;
 httpServer.headersTimeout = Math.max(120000, Math.min(LONG_UPLOAD_REQUEST_TIMEOUT_MS, 10 * 60 * 1000));
@@ -201,6 +221,8 @@ httpServer.headersTimeout = Math.max(120000, Math.min(LONG_UPLOAD_REQUEST_TIMEOU
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY ?? "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
 const SMARTPLAY_AI_URL = String(process.env.SMARTPLAY_AI_URL ?? "").trim().replace(/\/+$/, "");
+const SMARTPLAY_CALLBACK_SECRET = String(process.env.SMARTPLAY_CALLBACK_SECRET ?? "").trim();
+const DEV_ENABLE_MOCK_LIVE = process.env.DEV_ENABLE_MOCK_LIVE === "1";
 const SMARTPLAY_PROXY_TIMEOUT_MS = Number(process.env.SMARTPLAY_PROXY_TIMEOUT_MS ?? 120000);
 const SMARTPLAY_V1_MATCH_CONFIG = {
   match_0004_padel: {
@@ -218,6 +240,7 @@ const SMARTPLAY_V1_MATCH_CONFIG = {
 const TND_TO_EUR_RATE = 0.30;
 const uploadsDir = path.resolve(process.cwd(), "uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
+const liveMockTimers = new Map();
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -564,6 +587,241 @@ async function callSmartPlayJson(pathname, options = {}) {
   const response = await fetchSmartPlay(pathname, options);
   const body = await readSmartPlayResponse(response);
   return { response, body };
+}
+
+function liveRoom(sessionId) {
+  return `live-session:${Number(sessionId)}`;
+}
+
+function requireSmartPlayCallback(req, res, next) {
+  if (!SMARTPLAY_CALLBACK_SECRET) {
+    return res.status(503).json({ message: "SMARTPLAY_CALLBACK_SECRET is not configured." });
+  }
+  const provided = String(req.headers["x-smartplay-callback-secret"] ?? req.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "");
+  if (provided !== SMARTPLAY_CALLBACK_SECRET) {
+    return res.status(401).json({ message: "Invalid SmartPlay callback secret." });
+  }
+  return next();
+}
+
+function stopMockLiveSession(sessionId) {
+  const timer = liveMockTimers.get(Number(sessionId));
+  if (timer) {
+    clearInterval(timer);
+    liveMockTimers.delete(Number(sessionId));
+  }
+}
+
+function startMockLiveSession(sessionId) {
+  stopMockLiveSession(sessionId);
+  let frame = 0;
+  const startedAt = Date.now();
+  const timer = setInterval(() => {
+    frame += 3;
+    const t = (Date.now() - startedAt) / 1000;
+    const ballX = 0.5 + Math.sin(t * 1.7) * 0.36;
+    const ballY = 0.5 + Math.cos(t * 1.3) * 0.28;
+    const players = [0, 1, 2, 3].map((i) => {
+      const angle = t * (0.35 + i * 0.04) + i * Math.PI * 0.5;
+      return {
+        trackId: `mock-p${i + 1}`,
+        label: `P${i + 1}`,
+        team: i < 2 ? "A" : "B",
+        confidence: 0.91,
+        bbox: {
+          x: Math.max(0.02, Math.min(0.92, 0.5 + Math.cos(angle) * (0.16 + i * 0.025))),
+          y: Math.max(0.04, Math.min(0.88, 0.5 + Math.sin(angle) * (0.22 + i * 0.015))),
+          w: 0.055,
+          h: 0.14,
+        },
+        poseStatus: frame % (12 + i) < 8 ? "tracked" : "estimated",
+      };
+    });
+    const payload = {
+      sessionId: Number(sessionId),
+      frame,
+      timestampMs: Date.now(),
+      fps: 30,
+      status: "running",
+      source: "mock",
+      players,
+      ball: {
+        x: Math.max(0.03, Math.min(0.97, ballX)),
+        y: Math.max(0.04, Math.min(0.96, ballY)),
+        confidence: 0.88,
+      },
+      minimap: {
+        players: players.map((player) => ({
+          id: player.trackId,
+          label: player.label,
+          team: player.team,
+          x: player.bbox.x + player.bbox.w / 2,
+          y: player.bbox.y + player.bbox.h,
+        })),
+        ball: { x: ballX, y: ballY },
+      },
+      pose: { status: "tracking", trackedPlayers: players.length },
+    };
+    io.to(liveRoom(sessionId)).emit("live:update", payload);
+    if (frame % 30 === 0) {
+      void recordLiveUpdate({ sessionId, payload }).catch((error) => {
+        console.error("[live-mock] failed to persist update:", error);
+      });
+    }
+  }, 100);
+  liveMockTimers.set(Number(sessionId), timer);
+}
+
+function liveSessionPlayersForAi(session) {
+  return (session?.players ?? []).map((player) => ({
+    userId: player.userId,
+    slot: player.slot,
+    team: player.team,
+    sideHint: player.sideHint,
+    name: player.name,
+  }));
+}
+
+function inferLiveMode(session) {
+  const count = session?.players?.length ?? 0;
+  return count <= 2 ? "singles" : "doubles";
+}
+
+async function startRealLiveSession(session) {
+  if (!SMARTPLAY_AI_URL) {
+    const error = new Error("SmartPlay AI service is not configured. Set SMARTPLAY_AI_URL to enable live analysis.");
+    error.statusCode = 503;
+    throw error;
+  }
+  let resolvedSession = session;
+  if (!resolvedSession.cameraId || !resolvedSession.cameraUrl) {
+    const activeCamera = await getActiveCourtCamera(resolvedSession.courtId);
+    if (!activeCamera) {
+      const error = new Error("No active live camera is configured for this court. Configure a court camera before starting live analysis.");
+      error.statusCode = 400;
+      throw error;
+    }
+    const { default: pgPool } = await import("./pg-pool.mjs");
+    await pgPool.query("UPDATE live_sessions SET camera_id = $1, updated_at = NOW() WHERE id = $2", [activeCamera.id, resolvedSession.id]);
+    resolvedSession = await getLiveSessionById(resolvedSession.id);
+  }
+  if (!resolvedSession.cameraUrl) {
+    const error = new Error("No camera source configured for this live session.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  await updateLiveSessionStatus({
+    sessionId: resolvedSession.id,
+    status: "starting",
+    message: "Starting SmartPlay AI live visual analysis.",
+  });
+
+  const calibration = await getCourtLiveCalibration(resolvedSession.courtId, resolvedSession.cameraId);
+  if (!calibration?.isValidForLive) {
+    const error = new Error(
+      calibration?.homography_json_path
+        ? "Court calibration is not valid for live analysis. Re-annotate or mark the calibration valid."
+        : "Court live calibration is missing. Annotate the court first so live analysis can reuse its homography."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+  const callbackBaseUrl = `${SMARTPLAY_CALLBACK_BASE_URL}/api/smartplay/live/${resolvedSession.id}`;
+  const homographyJsonPath = calibration?.homography_json_path
+    ? path.resolve(process.cwd(), calibration.homography_json_path)
+    : null;
+  const requestPayload = {
+    sessionId: resolvedSession.id,
+    source: resolvedSession.cameraUrl,
+    camera_url: resolvedSession.cameraUrl,
+    cameraType: resolvedSession.cameraType ?? "file_demo",
+    camera_type: resolvedSession.cameraType ?? "file_demo",
+    cameraId: resolvedSession.cameraId,
+    courtId: resolvedSession.courtId,
+    arenaId: resolvedSession.arenaId,
+    reservationId: resolvedSession.reservationId,
+    matchId: resolvedSession.matchId,
+    competitionId: resolvedSession.competitionId,
+    sport: calibration?.sport ?? calibration?.sport_type ?? "padel",
+    homographyJson: homographyJsonPath,
+    homography_json_path: homographyJsonPath,
+    homographyJsonPath,
+    callback_url: `${callbackBaseUrl}/update`,
+    callbackUrl: `${callbackBaseUrl}/update`,
+    callbacks: {
+      update: `${callbackBaseUrl}/update`,
+      status: `${callbackBaseUrl}/status`,
+      error: `${callbackBaseUrl}/error`,
+    },
+    callbackSecretHeader: "x-smartplay-callback-secret",
+    callbackSecret: SMARTPLAY_CALLBACK_SECRET || null,
+    players: liveSessionPlayersForAi(resolvedSession),
+    mode: inferLiveMode(resolvedSession),
+    visual_only: true,
+    scoring_enabled: false,
+    // TODO: Finalize this contract with smartplay_ai once its live endpoint stabilizes.
+  };
+
+  const { response, body } = await callSmartPlayJson("/live/start", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(SMARTPLAY_CALLBACK_SECRET ? { "x-smartplay-callback-secret": SMARTPLAY_CALLBACK_SECRET } : {}),
+    },
+    body: JSON.stringify(requestPayload),
+  });
+
+  if (!response.ok) {
+    await updateLiveSessionStatus({
+      sessionId: resolvedSession.id,
+      status: "error",
+      message: body?.message ?? "SmartPlay AI live start failed.",
+    });
+    const error = new Error(body?.message ?? "SmartPlay AI live start failed.");
+    error.statusCode = response.status;
+    error.body = body;
+    throw error;
+  }
+
+  const aiSessionId = body?.ai_session_id ?? body?.aiSessionId ?? body?.session_id ?? null;
+  await updateLiveSessionStatus({
+    sessionId: resolvedSession.id,
+    status: "running",
+    message: body?.message ?? "SmartPlay AI live visual analysis running.",
+    aiSessionId,
+  });
+  io.to(liveRoom(resolvedSession.id)).emit("live:status", {
+    sessionId: resolvedSession.id,
+    status: "running",
+    message: "SmartPlay AI live visual analysis running.",
+  });
+  const updatedSession = await getLiveSessionById(resolvedSession.id);
+  return {
+    session: {
+      ...updatedSession,
+      aiSessionId: updatedSession?.aiSessionId ?? aiSessionId,
+    },
+    ai: body ?? {},
+    requestPayload,
+  };
+}
+
+async function stopLiveSession(session, message = "Live analysis stopped.") {
+  stopMockLiveSession(session.id);
+  if (session.mode === "real" && SMARTPLAY_AI_URL && session.aiSessionId) {
+    await callSmartPlayJson("/live/stop", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(SMARTPLAY_CALLBACK_SECRET ? { "x-smartplay-callback-secret": SMARTPLAY_CALLBACK_SECRET } : {}),
+      },
+      body: JSON.stringify({ sessionId: session.id, aiSessionId: session.aiSessionId }),
+    }).catch((error) => console.warn("[live] SmartPlay stop failed:", error));
+  }
+  await updateLiveSessionStatus({ sessionId: session.id, status: "stopped", message, stopped: true });
+  io.to(liveRoom(session.id)).emit("live:stopped", { sessionId: session.id, status: "stopped" });
+  return getLiveSessionById(session.id);
 }
 
 function toScoringV2Payload(matchConfig, requestBody = {}) {
@@ -2210,6 +2468,279 @@ app.post("/api/padel/reservations", requireAuth, async (req, res) => {
   }
 });
 
+// Live SmartPlay visual analysis
+app.get("/api/live-sessions/health", (_req, res) => {
+  res.json({
+    ok: true,
+    mounted: true,
+    smartplayAiConfigured: Boolean(SMARTPLAY_AI_URL),
+    mockEnabled: DEV_ENABLE_MOCK_LIVE,
+  });
+});
+
+app.get("/api/live-sessions", requireAuth, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) return res.status(401).json({ message: "User not found" });
+    const sessions = await listLiveSessions({ actor, status: req.query.status ?? null });
+    res.json({ sessions });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to load live sessions" });
+  }
+});
+
+app.get("/api/live-sessions/:id", optionalAuth, async (req, res) => {
+  try {
+    const actor = req.user ? await attachActor(req) : null;
+    const session = await getLiveSessionById(req.params.id);
+    if (!session) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canViewLiveSession(actor, session))) return res.status(403).json({ message: "Live session access denied" });
+    res.json({ session });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to load live session" });
+  }
+});
+
+app.get("/api/live-sessions/:id/source-video", async (req, res) => {
+  try {
+    const token = String(req.query.token ?? "").trim();
+    const header = req.headers.authorization;
+    const bearer = header?.startsWith("Bearer ") ? header.slice(7) : "";
+    const rawToken = bearer || token;
+    if (!rawToken) return res.status(401).json({ message: "Authentication required" });
+
+    try {
+      req.user = jwt.verify(rawToken, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ message: "Invalid token" });
+    }
+
+    const actor = await attachActor(req);
+    const session = await getLiveSessionById(req.params.id);
+    if (!session) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canViewLiveSession(actor, session))) return res.status(403).json({ message: "Live session access denied" });
+    if (session.cameraType !== "file_demo") return res.status(400).json({ message: "Live source preview is only available for file_demo cameras." });
+    if (!session.cameraUrl) return res.status(404).json({ message: "No camera source is configured for this live session." });
+
+    return sendLocalVideoFile(res, session.cameraUrl, "Live source video file was not found.");
+  } catch (error) {
+    return res.status(400).json({ message: error instanceof Error ? error.message : "Unable to load live source video." });
+  }
+});
+
+app.get("/api/live-sessions/:id/rendered-stream", async (req, res) => {
+  try {
+    const token = String(req.query.token ?? "").trim();
+    const header = req.headers.authorization;
+    const bearer = header?.startsWith("Bearer ") ? header.slice(7) : "";
+    const rawToken = bearer || token;
+    if (!rawToken) return res.status(401).json({ message: "Authentication required" });
+
+    try {
+      req.user = jwt.verify(rawToken, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ message: "Invalid token" });
+    }
+
+    const actor = await attachActor(req);
+    const session = await getLiveSessionById(req.params.id);
+    if (!session) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canViewLiveSession(actor, session))) return res.status(403).json({ message: "Live session access denied" });
+    if (!session.aiSessionId) return res.status(404).json({ message: "Rendered stream is not ready yet." });
+    if (!SMARTPLAY_AI_URL) return sendSmartPlayNotConfigured(res);
+
+    const response = await fetchSmartPlay(`/live/rendered/${encodeURIComponent(session.aiSessionId)}.mjpg`);
+    if (!response.ok || !response.body) {
+      return res.status(response.status || 502).json({ message: "Rendered live stream is not available." });
+    }
+    res.setHeader("content-type", response.headers.get("content-type") ?? "multipart/x-mixed-replace; boundary=frame");
+    res.setHeader("cache-control", "no-store");
+    return Readable.fromWeb(response.body).pipe(res);
+  } catch (error) {
+    return sendSmartPlayFetchError(res, error);
+  }
+});
+
+app.post("/api/live-sessions", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    if (!actor) return res.status(401).json({ message: "User not found" });
+    const body = req.body ?? {};
+    const session = await createLiveSession({ actor, mode: "real", ...body });
+    res.status(201).json({ session });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to create live session" });
+  }
+});
+
+app.post("/api/live-sessions/:id/start", requireAuth, requireAdmin, async (req, res) => {
+  let startingSessionId = null;
+  try {
+    const actor = await attachActor(req);
+    const existing = await getLiveSessionById(req.params.id);
+    if (!existing) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canManageLiveSession(actor, existing.arenaId))) return res.status(403).json({ message: "Admin access denied" });
+
+    const mode = String(req.body?.mode ?? existing.mode ?? "real").trim().toLowerCase();
+    startingSessionId = existing.id;
+    await updateLiveSessionStatus({ sessionId: existing.id, status: "starting", message: mode === "mock" ? "Starting mock visual stream." : "Starting SmartPlay AI live analysis." });
+
+    if (mode === "mock") {
+      if (!DEV_ENABLE_MOCK_LIVE) {
+        return res.status(403).json({ message: "Mock live mode is disabled. Set DEV_ENABLE_MOCK_LIVE=1 for local development." });
+      }
+      await updateLiveSessionStatus({ sessionId: existing.id, status: "running", message: "Mock visual analysis running.", aiSessionId: `mock-${existing.id}` });
+      startMockLiveSession(existing.id);
+      io.to(liveRoom(existing.id)).emit("live:status", { sessionId: existing.id, status: "running", message: "Mock visual analysis running." });
+      return res.json({ session: await getLiveSessionById(existing.id), mock: true });
+    }
+
+    const result = await startRealLiveSession(existing);
+    res.json(result);
+  } catch (error) {
+    if (startingSessionId) {
+      await updateLiveSessionStatus({
+        sessionId: startingSessionId,
+        status: "error",
+        message: error instanceof Error ? error.message : "Unable to start live session",
+      }).catch(() => {});
+    }
+    res.status(error.statusCode ?? 400).json(error.body ?? { message: error instanceof Error ? error.message : "Unable to start live session" });
+  }
+});
+
+app.post("/api/live-sessions/:id/stop", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    const existing = await getLiveSessionById(req.params.id);
+    if (!existing) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canManageLiveSession(actor, existing.arenaId))) return res.status(403).json({ message: "Admin access denied" });
+    res.json({ session: await stopLiveSession(existing) });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to stop live session" });
+  }
+});
+
+app.get("/api/live-sessions/:id/status", optionalAuth, async (req, res) => {
+  try {
+    const actor = req.user ? await attachActor(req) : null;
+    const session = await getLiveSessionById(req.params.id);
+    if (!session) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canViewLiveSession(actor, session))) return res.status(403).json({ message: "Live session access denied" });
+    res.json({ status: session.status, fps: session.fps, lastFrame: session.lastFrame, lastUpdateAt: session.lastUpdateAt, message: session.aiStatusMessage });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to load live status" });
+  }
+});
+
+app.get("/api/live-sessions/:id/latest-update", optionalAuth, async (req, res) => {
+  try {
+    const actor = req.user ? await attachActor(req) : null;
+    const session = await getLiveSessionById(req.params.id);
+    if (!session) return res.status(404).json({ message: "Live session not found" });
+    if (!(await canViewLiveSession(actor, session))) return res.status(403).json({ message: "Live session access denied" });
+    res.json({ update: await getLatestLiveUpdate(req.params.id) });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to load latest live update" });
+  }
+});
+
+app.get("/api/courts/:courtId/cameras", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    const { cameras } = await listCourtCameras(req.params.courtId, actor);
+    res.json({ cameras });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to load cameras" });
+  }
+});
+
+app.post("/api/courts/:courtId/cameras", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    const camera = await createCourtCamera({ courtId: req.params.courtId, actor, ...(req.body ?? {}) });
+    res.status(201).json({ camera });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to create camera" });
+  }
+});
+
+app.get("/api/courts/:courtId/calibration", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const calibration = await getCourtLiveCalibration(req.params.courtId, req.query.cameraId ?? null);
+    res.json({ calibration });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to load calibration" });
+  }
+});
+
+app.post("/api/courts/:courtId/calibration", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const actor = await attachActor(req);
+    const calibration = await saveCourtLiveCalibration({ courtId: req.params.courtId, actor, ...(req.body ?? {}) });
+    res.status(201).json({ calibration });
+  } catch (error) {
+    res.status(error.statusCode ?? 400).json({ message: error instanceof Error ? error.message : "Unable to save calibration" });
+  }
+});
+
+app.post("/api/smartplay/live/:sessionId/update", requireSmartPlayCallback, async (req, res) => {
+  try {
+    const session = await recordLiveUpdate({ sessionId: req.params.sessionId, payload: req.body ?? {}, sample: Boolean(req.body?.sample) });
+    io.to(liveRoom(req.params.sessionId)).emit("live:update", { sessionId: Number(req.params.sessionId), ...(req.body ?? {}) });
+    res.json({ ok: true, session });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to accept live update" });
+  }
+});
+
+app.post("/api/smartplay/live/:sessionId/status", requireSmartPlayCallback, async (req, res) => {
+  try {
+    const status = String(req.body?.status ?? "running");
+    const message = req.body?.message ? String(req.body.message) : null;
+    const session = await updateLiveSessionStatus({ sessionId: req.params.sessionId, status, message, aiSessionId: req.body?.aiSessionId ?? req.body?.ai_session_id ?? null });
+    io.to(liveRoom(req.params.sessionId)).emit("live:status", { sessionId: Number(req.params.sessionId), status, message });
+    res.json({ ok: true, session });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to accept live status" });
+  }
+});
+
+app.post("/api/smartplay/live/:sessionId/error", requireSmartPlayCallback, async (req, res) => {
+  try {
+    const message = req.body?.message ? String(req.body.message) : "SmartPlay AI live analysis error.";
+    const session = await updateLiveSessionStatus({ sessionId: req.params.sessionId, status: "error", message });
+    io.to(liveRoom(req.params.sessionId)).emit("live:error", { sessionId: Number(req.params.sessionId), message, detail: req.body ?? {} });
+    res.json({ ok: true, session });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Unable to accept live error" });
+  }
+});
+
+async function tickReservationLiveAnalysis() {
+  const toStop = await listLiveSessionsNeedingStop();
+  for (const row of toStop) {
+    const session = await getLiveSessionById(row.id);
+    if (session) {
+      await stopLiveSession(session, "Reservation ended. Live analysis stopped.");
+    }
+  }
+
+  const reservations = await listReservationsNeedingLiveStart();
+  for (const reservation of reservations) {
+    try {
+      const camera = await getActiveCourtCamera(reservation.court_id);
+      if (!camera) throw new Error(`No active live camera configured for court ${reservation.court_id}`);
+      const players = await listReservationLivePlayers(reservation.id);
+      const session = await createSystemLiveSessionForReservation({ reservation, camera, players });
+      await startRealLiveSession(session);
+      console.log(`[live-reservation] started session ${session.id} for reservation ${reservation.id}`);
+    } catch (error) {
+      console.error("[live-reservation] auto-start failed:", error instanceof Error ? error.message : error);
+    }
+  }
+}
+
 io.on("connection", async (socket) => {
   try {
     socket.emit("scores:update", { matches: await listMatches() });
@@ -2217,6 +2748,14 @@ io.on("connection", async (socket) => {
     // eslint-disable-next-line no-console
     console.error("Unable to push initial live scores:", error);
   }
+
+  socket.on("live:join", ({ sessionId } = {}) => {
+    if (sessionId) socket.join(liveRoom(sessionId));
+  });
+
+  socket.on("live:leave", ({ sessionId } = {}) => {
+    if (sessionId) socket.leave(liveRoom(sessionId));
+  });
 });
 
 // ── Smart Scoring ────────────────────────────────────────────────────────────
@@ -3528,6 +4067,14 @@ setInterval(async () => {
     console.error("Live score loop error:", error);
   }
 }, 5000);
+
+setInterval(async () => {
+  try {
+    await tickReservationLiveAnalysis();
+  } catch (error) {
+    console.error("Live analysis scheduler error:", error);
+  }
+}, 30000);
 
 const shutdown = async () => {
   await closePool();

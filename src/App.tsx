@@ -32,6 +32,7 @@ import ReservationChoice from "./pages/ReservationChoice";
 import CoachBooking from "./pages/CoachBooking";
 import PaymentSuccess from "./pages/PaymentSuccess";
 import PaymentCancel from "./pages/PaymentCancel";
+import LiveSessionPage from "./pages/LiveSessionPage";
 
 const queryClient = new QueryClient();
 
@@ -98,6 +99,10 @@ const App = () => (
               <Route 
                 path="/smartplay-ai" 
                 element={<AuthGuard><SmartPlayAI /></AuthGuard>} 
+              />
+              <Route
+                path="/live-sessions/:id"
+                element={<LiveSessionPage />}
               />
               <Route
                 path="/coach"

@@ -320,7 +320,7 @@ export default function CourtCalibrationPanel() {
   const placedIds = new Set(placedPoints.map((p) => p.kpId));
 
   return (
-    <section className="gradient-card rounded-2xl border border-border/50 p-5 space-y-5">
+    <section id="court-calibration-panel" className="gradient-card rounded-2xl border border-border/50 p-5 space-y-5">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-lg font-display font-bold flex items-center gap-2">

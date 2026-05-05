@@ -13,6 +13,7 @@ import { getSessionUser, getToken } from "@/lib/session";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import QRCode from "qrcode";
+import PlayerLiveSessionCard from "@/components/smartplay/PlayerLiveSessionCard";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -376,6 +377,7 @@ const Performance = () => {
             <h3 className="text-lg font-bold flex items-center gap-2">
               <Video size={18} className="text-primary" /> My SmartPlay Videos
             </h3>
+            <PlayerLiveSessionCard />
             {clipsLoading ? (
               <div className="space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-48 rounded-xl" />)}</div>
             ) : !myClips.length ? (

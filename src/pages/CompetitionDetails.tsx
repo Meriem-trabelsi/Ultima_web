@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { getSessionUser } from "@/lib/session";
 import { Skeleton } from "@/components/ui/skeleton";
+import CompetitionLiveMatchPanel from "@/components/smartplay/CompetitionLiveMatchPanel";
 
 type Participant = {
   id: number;
@@ -155,6 +156,7 @@ const CompetitionDetails = () => {
                 </div>
               </div>
             </section>
+            <CompetitionLiveMatchPanel competitionId={comp.id} />
 
             {/* Rules */}
             <section>

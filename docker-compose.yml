@@ -44,6 +44,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./database/postgres_init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
       - ./database/smartplay_upgrade.sql:/docker-entrypoint-initdb.d/02-smartplay.sql:ro
+      - ./database/live_visual_analysis.sql:/docker-entrypoint-initdb.d/03-live-visual-analysis.sql:ro
 
   api:
     build:
@@ -77,6 +78,7 @@ services:
       PORT: 3001
       REDIS_URL: redis://redis:6379
       SMARTPLAY_AI_URL: ${SMARTPLAY_AI_URL:-}
+      SMARTPLAY_CALLBACK_SECRET: ${SMARTPLAY_CALLBACK_SECRET:-change-me-for-live-callbacks}
       SMARTPLAY_GENERATE_BROWSER_PREVIEW: ${SMARTPLAY_GENERATE_BROWSER_PREVIEW:-1}
       FFMPEG_PATH: ${FFMPEG_PATH:-ffmpeg}
       PUBLIC_WEB_BASE_URL: ${PUBLIC_WEB_BASE_URL:-http://localhost:5173}
